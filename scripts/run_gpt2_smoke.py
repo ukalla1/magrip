@@ -224,6 +224,18 @@ def main() -> None:
             "magnitude": tensor_stats(result.saliency.magnitude[key]),
             "gradient": tensor_stats(result.saliency.gradient[key]),
             "combined": tensor_stats(result.saliency.combined()[key]),
+            "metadata": result.saliency.metadata.get(key, {}),
+            "branch_diagnostics": {
+                module_path: {
+                    "magnitude": tensor_stats(branch_magnitude),
+                    "gradient": tensor_stats(
+                        result.saliency.branch_gradient[key][module_path],
+                    ),
+                }
+                for module_path, branch_magnitude in result.saliency.branch_magnitude
+                .get(key, {})
+                .items()
+            },
         }
         for key in result.saliency.magnitude
     }

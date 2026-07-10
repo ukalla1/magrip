@@ -50,6 +50,7 @@ docs/
   V1_BASELINE.md
   FFN_DISCOVERY.md
   MASK_SYSTEM.md
+  SALIENCY_SYSTEM.md
   APOLLO_INTEGRATION.md
   EXPERIMENTS.md
 models/
@@ -109,13 +110,19 @@ M3 is complete. The smoke path still preserves M1 frozen-mask behavior, but mask
 
 ### M4: Saliency System
 
-- [ ] Implement activation magnitude saliency.
-- [ ] Implement gradient-informed saliency using the first-order proxy in `docs/THEORY.tex`.
-- [ ] Add layer-local normalization and optional global ranking.
-- [ ] Add saliency recomputation hooks during joint training.
-- [ ] Add diagnostics for saliency drift as weights adapt.
-- [ ] Add tests that compare mask-gradient saliency with explicit mask gradients on toy modules.
-- [ ] Inspect saliency-system results for technical correctness on dense and gated smoke runs.
+- [x] Implement activation magnitude saliency.
+- [x] Implement gradient-informed saliency using the first-order proxy in `docs/THEORY.tex`.
+- [x] Add layer-local normalization and optional global ranking.
+- [x] Add saliency recomputation hooks during joint training.
+- [x] Add diagnostics for saliency drift as weights adapt.
+- [x] Add tests that compare mask-gradient saliency with explicit mask gradients on toy modules.
+- [x] Inspect saliency-system results for technical correctness on dense and gated smoke runs.
+
+M4 implementation is complete. The primary saliency signal is now collected at the FFN
+contraction input, matching the theory-level intermediate `u`; branch-level expansion
+signals remain available as diagnostics. Dense and gated smoke artifacts have been
+inspected for source metadata, channel consistency, branch diagnostics, retained budget
+accounting, and loss/perplexity behavior.
 
 ### M5: Objectives and Training Loop
 

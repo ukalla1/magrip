@@ -15,6 +15,8 @@ The current focus is topology-aware FFN discovery and smoke-test validation. The
 - M2 artifact validation: available for smoke-run summaries.
 - M3 mask system: implemented with structured masks, STE-ready logits, cost accounting,
   and serialization.
+- M4 saliency system: implemented with contraction-input saliency, branch diagnostics,
+  normalization modes, and drift tracking.
 
 ## Default Assumptions
 
@@ -50,6 +52,7 @@ Each run also writes structured logs under `outputs/runs/<run-name>/`:
 
 - `events.jsonl`: timestamped events for loading, target discovery, pruning, metrics, and artifacts.
 - `summary.json`: final manifest with loss/perplexity deltas, mask stats, and saliency stats.
+  M4 saliency summaries include the primary saliency source and optional branch diagnostics.
 
 The pruned artifact directory also includes:
 

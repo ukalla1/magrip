@@ -222,3 +222,17 @@ def _validate_saliency_stats(
             result.errors.append(f"Saliency {key}/{name} has no elements.")
         if stats.get("max") is None or stats.get("mean") is None:
             result.errors.append(f"Saliency {key}/{name} is missing numeric stats.")
+
+    metadata = saliency_stats.get("metadata")
+    if metadata is not None and metadata.get("source") != "contract_input":
+        result.errors.append(
+            f"Saliency {key} has unexpected source {metadata.get('source')!r}."
+        )
+
+    branch_diagnostics = saliency_stats.get("branch_diagnostics")
+    if branch_diagnostics is not None:
+        for module_path, diagnostics in branch_diagnostics.items():
+            if "magnitude" not in diagnostics or "gradient" not in diagnostics:
+                result.errors.append(
+                    f"Saliency {key} branch {module_path} is missing diagnostics."
+                )
