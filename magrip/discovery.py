@@ -5,109 +5,121 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from magrip.module_utils import get_module_by_path
-from magrip.topology import FFNTarget, FFNTopologyKind
+from magrip.topology import DiscoveryIssue, DiscoveryReport, FFNTarget
+from magrip.topology_registry import (
+    iter_transformer_block_stacks,
+    looks_like_moe,
+    match_registered_topology,
+)
 
 
 def discover_ffn_targets(model: object) -> Sequence[FFNTarget]:
-    """Return prunable FFN targets for a model.
+    """Return prunable FFN targets for a model."""
 
-    M1 supports GPT-2 dense FFNs and Gemma/LLaMA/Qwen-style gated FFNs. M2 will
-    generalize this into a richer topology registry.
+    return discover_ffn_topology(model).targets
+
+
+def discover_ffn_topology(model: object) -> DiscoveryReport:
+    """Discover FFN targets and topology issues for a model.
+
+    Discovery is intentionally restricted to repeated transformer block stacks. This avoids
+    pruning embeddings, LM heads, classifiers, and other non-transformer modules.
     """
 
-    return [
-        *list(_discover_gpt2_dense_targets(model)),
-        *list(_discover_decoder_gated_targets(model)),
-    ]
+    report = DiscoveryReport()
+    seen_paths: set[str] = set()
+    for stack_path, layers in iter_transformer_block_stacks(model):
+        for block_index, block in enumerate(layers):
+            block_path = f"{stack_path}.{block_index}"
+            if block_path in seen_paths:
+                continue
+            seen_paths.add(block_path)
+            _inspect_block(block=block, block_index=block_index, block_path=block_path, report=report)
+    return report
 
 
-def _discover_gpt2_dense_targets(model: object) -> Sequence[FFNTarget]:
-    if not hasattr(model, "transformer") or not hasattr(model.transformer, "h"):
-        return []
+def _inspect_block(
+    block: object,
+    block_index: int,
+    block_path: str,
+    report: DiscoveryReport,
+) -> None:
+    mlp = _find_ffn_module(block)
+    if mlp is None:
+        report.issues.append(
+            DiscoveryIssue(path=block_path, reason="No FFN/MLP child was found in block.")
+        )
+        return
 
-    targets: list[FFNTarget] = []
-    for block_index, block in enumerate(model.transformer.h):
-        mlp = getattr(block, "mlp", None)
-        if mlp is None or not hasattr(mlp, "c_fc") or not hasattr(mlp, "c_proj"):
-            continue
-
-        block_path = f"transformer.h.{block_index}"
-        ffn_path = f"{block_path}.mlp"
-        c_fc_path = f"{ffn_path}.c_fc"
-        c_proj_path = f"{ffn_path}.c_proj"
-
-        c_fc = get_module_by_path(model, c_fc_path)
-        c_proj = get_module_by_path(model, c_proj_path)
-        targets.append(
-            FFNTarget(
-                block_index=block_index,
-                block_path=block_path,
-                ffn_path=ffn_path,
-                topology=FFNTopologyKind.DENSE,
-                expand_module_paths=(c_fc_path,),
-                contract_module_paths=(c_proj_path,),
-                intermediate_size=_output_features(c_fc),
-                hidden_size=_output_features(c_proj),
+    ffn_path = f"{block_path}.{_ffn_child_name(block)}"
+    if looks_like_moe(mlp):
+        report.issues.append(
+            DiscoveryIssue(
+                path=ffn_path,
+                reason="MoE-style FFN detected and skipped in M2.",
             )
         )
-    return targets
+        return
 
-
-def _discover_decoder_gated_targets(model: object) -> Sequence[FFNTarget]:
-    layers_path = _find_decoder_layers_path(model)
-    if layers_path is None:
-        return []
-
-    layers = get_module_by_path(model, layers_path)
-    targets: list[FFNTarget] = []
-    for block_index, block in enumerate(layers):
-        mlp = getattr(block, "mlp", None)
-        if (
-            mlp is None
-            or not hasattr(mlp, "gate_proj")
-            or not hasattr(mlp, "up_proj")
-            or not hasattr(mlp, "down_proj")
-        ):
-            continue
-
-        block_path = f"{layers_path}.{block_index}"
-        ffn_path = f"{block_path}.mlp"
-        gate_path = f"{ffn_path}.gate_proj"
-        up_path = f"{ffn_path}.up_proj"
-        down_path = f"{ffn_path}.down_proj"
-
-        gate_proj = get_module_by_path(model, gate_path)
-        down_proj = get_module_by_path(model, down_path)
-        targets.append(
-            FFNTarget(
-                block_index=block_index,
-                block_path=block_path,
-                ffn_path=ffn_path,
-                topology=FFNTopologyKind.GATED,
-                expand_module_paths=(gate_path, up_path),
-                contract_module_paths=(down_path,),
-                intermediate_size=_output_features(gate_proj),
-                hidden_size=_output_features(down_proj),
+    topology = match_registered_topology(mlp)
+    if topology is None:
+        report.issues.append(
+            DiscoveryIssue(
+                path=ffn_path,
+                reason=f"Unsupported FFN topology on module type {type(mlp).__name__}.",
             )
         )
-    return targets
+        return
 
+    expand_paths = tuple(f"{ffn_path}.{name}" for name in topology.expand_names)
+    contract_paths = tuple(f"{ffn_path}.{name}" for name in topology.contract_names)
+    expand_modules = [get_module_by_path(mlp, name) for name in topology.expand_names]
+    contract_modules = [get_module_by_path(mlp, name) for name in topology.contract_names]
+    intermediate_size = _shared_output_features(expand_modules)
+    hidden_size = _first_output_features(contract_modules)
 
-def _find_decoder_layers_path(model: object) -> str | None:
-    candidate_paths = (
-        "model.layers",
-        "language_model.model.layers",
-        "transformer.layers",
-        "decoder.layers",
+    report.targets.append(
+        FFNTarget(
+            block_index=block_index,
+            block_path=block_path,
+            ffn_path=ffn_path,
+            topology=topology.kind,
+            expand_module_paths=expand_paths,
+            contract_module_paths=contract_paths,
+            intermediate_size=intermediate_size,
+            hidden_size=hidden_size,
+            registry_name=topology.name,
+        )
     )
-    for path in candidate_paths:
-        try:
-            layers = get_module_by_path(model, path)
-        except (AttributeError, IndexError, TypeError):
-            continue
-        if hasattr(layers, "__iter__"):
-            return path
+
+
+def _find_ffn_module(block: object) -> object | None:
+    child_name = _ffn_child_name(block)
+    if child_name:
+        return getattr(block, child_name)
     return None
+
+
+def _ffn_child_name(block: object) -> str | None:
+    for name in ("mlp", "feed_forward", "ffn"):
+        if hasattr(block, name):
+            return name
+    return None
+
+
+def _shared_output_features(modules: Sequence[object]) -> int | None:
+    features = [_output_features(module) for module in modules]
+    if not features or any(value is None for value in features):
+        return None
+    if len(set(features)) != 1:
+        return None
+    return features[0]
+
+
+def _first_output_features(modules: Sequence[object]) -> int | None:
+    if not modules:
+        return None
+    return _output_features(modules[0])
 
 
 def _output_features(module: object) -> int | None:

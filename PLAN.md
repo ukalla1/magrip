@@ -81,16 +81,18 @@ M1 is complete. The GPT-2 dense baseline is validated by `outputs/runs/gpt2_smok
 
 ### M2: FFN Discovery and Topology Registry
 
-- [ ] Implement transformer block discovery for common Hugging Face layouts.
-- [ ] Restrict prunable search to repeated transformer blocks.
-- [ ] Detect dense FFNs, gated FFNs, and branched FFNs from module shapes and names.
-- [ ] Detect MoE blocks and skip them with a clear warning in v2.
-- [ ] Add `FFNTarget` and `FFNTopology` data structures.
-- [ ] Move M1 dense/gated discovery heuristics into an extensible topology registry.
-- [ ] Add topology sanity checks for saliency length, mask length, and expected channel count.
-- [ ] Add artifact validation checks for dense and gated smoke runs.
-- [ ] Write discovery tests using small synthetic transformer blocks.
-- [ ] Write model inspection output that explains what MaGRIP will prune before training starts.
+- [x] Implement transformer block discovery for common Hugging Face layouts.
+- [x] Restrict prunable search to repeated transformer blocks.
+- [x] Detect dense FFNs, gated FFNs, and branched FFNs from module shapes and names.
+- [x] Detect MoE blocks and skip them with a clear warning in v2.
+- [x] Add `FFNTarget` and `FFNTopology` data structures.
+- [x] Move M1 dense/gated discovery heuristics into an extensible topology registry.
+- [x] Add topology sanity checks for saliency length, mask length, and expected channel count.
+- [x] Add artifact validation checks for dense and gated smoke runs.
+- [x] Write discovery tests using small synthetic transformer blocks.
+- [x] Write model inspection output that explains what MaGRIP will prune before training starts.
+
+M2 is complete. Discovery is now registry-backed, restricted to known repeated transformer block stacks, and reports skipped MoE-like FFNs. The inspection and artifact-validation scripts provide the main server-side checks before pruning.
 
 ### M3: Mask System
 

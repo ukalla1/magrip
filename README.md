@@ -2,7 +2,7 @@
 
 MaGRIP v2 is a work-in-progress framework for Magnitude and Gradient Informed Pruning of large language models.
 
-The current focus is project scaffolding and design. The mathematical reference is [`docs/THEORY.tex`](docs/THEORY.tex), and the implementation roadmap is [`PLAN.md`](PLAN.md).
+The current focus is topology-aware FFN discovery and smoke-test validation. The mathematical reference is [`docs/THEORY.tex`](docs/THEORY.tex), and the implementation roadmap is [`PLAN.md`](PLAN.md).
 
 ## Current Status
 
@@ -11,6 +11,8 @@ The current focus is project scaffolding and design. The mathematical reference 
 - Python package skeleton: initialized.
 - M1 dense GPT-2 frozen-pruning baseline: validated.
 - M1 Gemma/gated frozen-pruning baseline: validated.
+- M2 FFN discovery registry: implemented for common dense and gated transformer FFNs.
+- M2 artifact validation: available for smoke-run summaries.
 
 ## Default Assumptions
 
@@ -58,6 +60,28 @@ For a pure wiring check without downloading a dataset, use:
 
 ```bash
 python scripts/run_gpt2_smoke.py --calibration-source text --num-samples 1
+```
+
+## FFN Discovery Inspection
+
+Before a pruning run, inspect what MaGRIP will target:
+
+```bash
+python scripts/inspect_model.py --model-name gpt2
+python scripts/inspect_model.py --model-name google/gemma-2b
+```
+
+Expected M2 signals:
+
+- GPT-2 reports 12 dense FFN targets.
+- Gemma-2B reports 18 gated FFN targets.
+- The command ends with `Validation: OK`.
+
+Validate existing smoke artifacts with:
+
+```bash
+python scripts/validate_smoke_artifact.py outputs/runs/gpt2_smoke_20260710_001150/summary.json --expected-topology dense
+python scripts/validate_smoke_artifact.py outputs/runs/gpt2_smoke_20260710_121506/summary.json --expected-topology gated
 ```
 
 ## Gated FFN Smoke Test

@@ -17,6 +17,17 @@ class FFNTopologyKind(str, Enum):
 
 
 @dataclass
+class FFNTopology:
+    """Static description of an FFN topology pattern."""
+
+    name: str
+    kind: FFNTopologyKind
+    expand_names: tuple[str, ...]
+    contract_names: tuple[str, ...]
+    description: str
+
+
+@dataclass
 class FFNTarget:
     """A structured FFN pruning target inside a transformer block."""
 
@@ -28,3 +39,29 @@ class FFNTarget:
     contract_module_paths: tuple[str, ...] = field(default_factory=tuple)
     intermediate_size: int | None = None
     hidden_size: int | None = None
+    registry_name: str | None = None
+
+
+@dataclass
+class DiscoveryIssue:
+    """A warning or skipped module found during discovery."""
+
+    path: str
+    reason: str
+    severity: str = "warning"
+
+
+@dataclass
+class DiscoveryReport:
+    """Discovery output with targets plus skipped/diagnostic information."""
+
+    targets: list[FFNTarget] = field(default_factory=list)
+    issues: list[DiscoveryIssue] = field(default_factory=list)
+
+    @property
+    def target_count(self) -> int:
+        return len(self.targets)
+
+    @property
+    def issue_count(self) -> int:
+        return len(self.issues)
