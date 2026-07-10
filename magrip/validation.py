@@ -105,6 +105,10 @@ def validate_smoke_summary(
     if "baseline_perplexity" not in summary or "masked_perplexity" not in summary:
         result.errors.append("Artifact is missing baseline or masked perplexity.")
 
+    training = summary.get("training")
+    if training is not None:
+        _validate_training_summary(training, result)
+
     return result
 
 
@@ -236,3 +240,22 @@ def _validate_saliency_stats(
                 result.errors.append(
                     f"Saliency {key} branch {module_path} is missing diagnostics."
                 )
+
+
+def _validate_training_summary(training: dict[str, Any], result: ValidationResult) -> None:
+    metrics = training.get("metrics", [])
+    if training.get("num_steps", 0) <= 0:
+        result.errors.append("Training summary has no optimization steps.")
+    if not metrics:
+        result.errors.append("Training summary has no metric trace.")
+        return
+    for index, item in enumerate(metrics):
+        objective = item.get("objective", {})
+        for field in ("total_loss", "task_loss", "retained_cost_ratio"):
+            if field not in objective:
+                result.errors.append(f"Training metric {index} is missing objective {field}.")
+        retained = objective.get("retained_cost_ratio")
+        if retained is not None and not 0.0 <= retained <= 1.0:
+            result.errors.append(f"Training metric {index} has invalid retained ratio.")
+        if item.get("temperature", 0.0) <= 0.0:
+            result.errors.append(f"Training metric {index} has invalid temperature.")

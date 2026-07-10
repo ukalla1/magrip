@@ -30,6 +30,7 @@ class SaliencyConfig:
     normalization: SaliencyNormalization | str = SaliencyNormalization.LAYER_MEDIAN
     eps: float = 1e-8
     collect_branch_diagnostics: bool = True
+    require_parameter_gradients: bool = True
 
 
 @dataclass
@@ -222,7 +223,7 @@ def collect_saliency(
     model.train(False)
     original_requires_grad = [param.requires_grad for param in model.parameters()]
     for param in model.parameters():
-        param.requires_grad_(True)
+        param.requires_grad_(config.require_parameter_gradients)
 
     intermediate_activations: dict[tuple[str, str], Tensor] = {}
     branch_activations: dict[tuple[str, str], Tensor] = {}
@@ -238,10 +239,11 @@ def collect_saliency(
                             target_key=target.ffn_path,
                             module_path=module_path,
                             activations=intermediate_activations,
+                            detach_input=not config.require_parameter_gradients,
                         )
                     )
                 )
-            if config.collect_branch_diagnostics:
+            if config.collect_branch_diagnostics and config.require_parameter_gradients:
                 for module_path in target.expand_module_paths:
                     module = get_module_by_path(model, module_path)
                     handles.append(
@@ -294,11 +296,17 @@ def _make_contract_pre_hook(
     target_key: str,
     module_path: str,
     activations: dict[tuple[str, str], Tensor],
+    detach_input: bool,
 ):
-    def hook(module: object, inputs: tuple[object, ...]) -> None:
+    def hook(module: object, inputs: tuple[object, ...]) -> tuple[object, ...] | None:
         activation = _first_tensor_input(inputs, module_path)
+        if detach_input:
+            activation = activation.detach().requires_grad_(True)
         activation.retain_grad()
         activations[(target_key, module_path)] = activation
+        if detach_input:
+            return (activation, *inputs[1:])
+        return None
 
     return hook
 

@@ -51,6 +51,7 @@ docs/
   FFN_DISCOVERY.md
   MASK_SYSTEM.md
   SALIENCY_SYSTEM.md
+  TRAINING_LOOP.md
   APOLLO_INTEGRATION.md
   EXPERIMENTS.md
 models/
@@ -126,15 +127,22 @@ accounting, and loss/perplexity behavior.
 
 ### M5: Objectives and Training Loop
 
-- [ ] Implement task loss wrapper for causal language modeling.
-- [ ] Implement budget-aware objective with default `beta = 0`.
-- [ ] Add optional distillation modes: disabled, cached logits, top-k logits, hidden states, EMA teacher.
-- [ ] Implement joint two-time-scale optimization for weights and mask logits.
-- [ ] Add schedules for retained budget `rho_t`, budget pressure `lambda_t`, temperature `tau_t`, and mask update frequency.
-- [ ] Add gradient clipping for mask parameters.
-- [ ] Add stabilization stage and final weight-only recovery stage.
-- [ ] Add checkpointing for model weights, masks, optimizer states, and run config.
-- [ ] Inspect objective/training-loop results for technical correctness on dense and gated smoke runs.
+- [x] Implement task loss wrapper for causal language modeling.
+- [x] Implement budget-aware objective with default `beta = 0`.
+- [x] Add optional distillation scaffold: disabled by default plus cached-logit support.
+- [x] Implement joint two-time-scale optimization for weights and mask logits.
+- [x] Add schedules for retained budget `rho_t`, budget pressure `lambda_t`, temperature `tau_t`, and mask update frequency.
+- [x] Add gradient clipping for mask parameters.
+- [x] Add stabilization stage and final weight-only recovery stage.
+- [x] Add checkpointing for model weights, masks, optimizer states, and run config.
+- [x] Inspect objective/training-loop results for technical correctness on dense and gated smoke runs.
+
+M5 implementation is complete. The trainer defaults to mask-only adaptation, supports
+optional AdamW weight updates, keeps APOLLO reserved for M6, and records objective,
+budget, mask-gradient, retained-cost, checkpoint, and saliency-drift signals. M5 result
+inspection passed on GPT-2 dense and Gemma gated smoke runs. The quick runs are
+technically coherent, but longer runs should use stronger budget pressure because relaxed
+mask probabilities can drift below the final hard-mask target before hardening.
 
 ### M6: APOLLO Integration
 

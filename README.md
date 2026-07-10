@@ -17,6 +17,8 @@ The current focus is topology-aware FFN discovery and smoke-test validation. The
   and serialization.
 - M4 saliency system: implemented with contraction-input saliency, branch diagnostics,
   normalization modes, and drift tracking.
+- M5 objective/training loop: implemented for mask-only training by default, with optional
+  AdamW weight updates before APOLLO integration.
 
 ## Default Assumptions
 
@@ -134,3 +136,40 @@ The same entrypoint also works for dense models:
 ```bash
 python scripts/run_magrip_smoke.py --model-name gpt2 --device cuda
 ```
+
+## M5 Training Loop
+
+Run mask-only M5 training with:
+
+```bash
+python scripts/run_magrip_train.py \
+  --model-name gpt2 \
+  --device cuda \
+  --torch-dtype bfloat16 \
+  --max-steps 20 \
+  --retained-ratio 0.7 \
+  --dataset-split train \
+  --eval-dataset-split validation \
+  --num-samples 8 \
+  --max-length 128 \
+  --batch-size 1
+```
+
+For Gemma:
+
+```bash
+python scripts/run_magrip_train.py \
+  --model-name google/gemma-2b \
+  --device cuda \
+  --torch-dtype bfloat16 \
+  --max-steps 20 \
+  --retained-ratio 0.7 \
+  --dataset-split train \
+  --eval-dataset-split validation \
+  --num-samples 8 \
+  --max-length 128 \
+  --batch-size 1
+```
+
+The training summary writes objective traces under `training.metrics`.
+Additional analysis artifacts are written under `outputs/runs/<run>/metrics/`.

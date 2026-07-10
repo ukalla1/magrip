@@ -1,5 +1,5 @@
 torch>=2.2
-transformers>=4.46
+transformers>=4.51
 datasets>=2.20
 tqdm>=4.66
 numpy>=1.24
