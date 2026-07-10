@@ -1,0 +1,674 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsthm,mathtools}
+\usepackage{bm}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\usepackage{xcolor}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue,
+  citecolor=blue,
+  urlcolor=blue
+}
+
+\newtheorem{definition}{Definition}
+\newtheorem{proposition}{Proposition}
+\newtheorem{assumption}{Assumption}
+\newtheorem{remark}{Remark}
+
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\Loss}{\mathcal{L}}
+\newcommand{\Budget}{\mathcal{B}}
+\newcommand{\Cost}{\mathcal{C}}
+\newcommand{\Data}{\mathcal{D}}
+\newcommand{\Mask}{\mathcal{M}}
+\newcommand{\FFN}{\mathrm{FFN}}
+\newcommand{\KL}{\mathrm{KL}}
+\newcommand{\diag}{\mathrm{diag}}
+\newcommand{\sg}{\mathrm{sg}}
+
+\title{MaGRIP v2: Mathematical Motivation and Optimization Theory}
+\author{Magnitude and Gradient Informed Pruning for Large Language Models}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\section{Purpose}
+
+This document defines the theoretical basis for MaGRIP v2. The original MaGRIP implementation used a frozen language model, estimated FFN-channel saliency from activations and gradients, and optimized mask-related quantities without adapting the model weights. MaGRIP v2 generalizes this into a structured, budget-constrained pruning problem in which both masks and, optionally, model weights are trainable.
+
+The central goal is to prune feed-forward network (FFN) intermediate channels inside transformer blocks while preserving language-model quality. We intentionally avoid pruning embeddings, output heads, non-transformer projections, and mixture-of-experts routing components in the first version.
+
+\section{Model and FFN Structure}
+
+Let $f_{\theta}$ be a pretrained causal language model with parameters $\theta$. Let $\Data$ denote the calibration or adaptation dataset. For an input sequence $x = (x_1,\dots,x_T)$ and labels $y$, the task loss is
+\begin{equation}
+  \Loss_{\mathrm{task}}(\theta)
+  =
+  \E_{(x,y)\sim\Data}
+  \left[
+    -\sum_{t=1}^{T} \log p_{\theta}(y_t \mid x_{\leq t})
+  \right].
+\end{equation}
+
+For a transformer block $\ell$, denote the normalized hidden state entering the FFN by $h_{\ell}\in\R^{T\times d}$. A dense FFN can be written as
+\begin{equation}
+  \FFN_{\ell}(h_{\ell})
+  =
+  W_{\ell}^{\mathrm{out}}
+  \sigma\!\left(W_{\ell}^{\mathrm{in}}h_{\ell}\right),
+\end{equation}
+where $W_{\ell}^{\mathrm{in}}\in\R^{m_{\ell}\times d}$ expands the representation and $W_{\ell}^{\mathrm{out}}\in\R^{d\times m_{\ell}}$ contracts it back.
+
+Many modern LLMs use a gated FFN such as SwiGLU:
+\begin{equation}
+  \FFN_{\ell}(h_{\ell})
+  =
+  W_{\ell}^{\mathrm{down}}
+  \left[
+    \sigma\!\left(W_{\ell}^{\mathrm{gate}}h_{\ell}\right)
+    \odot
+    \left(W_{\ell}^{\mathrm{up}}h_{\ell}\right)
+  \right].
+  \label{eq:gated-ffn}
+\end{equation}
+Here $W_{\ell}^{\mathrm{gate}}, W_{\ell}^{\mathrm{up}}\in\R^{m_{\ell}\times d}$ and $W_{\ell}^{\mathrm{down}}\in\R^{d\times m_{\ell}}$.
+
+\begin{definition}[Structured FFN pruning unit]
+For block $\ell$, a pruning unit $i\in\{1,\dots,m_{\ell}\}$ is the set of parameters and activations associated with the $i$th intermediate FFN channel. For a gated FFN, unit $i$ contains row $i$ of $W_{\ell}^{\mathrm{gate}}$, row $i$ of $W_{\ell}^{\mathrm{up}}$, column $i$ of $W_{\ell}^{\mathrm{down}}$, and the corresponding intermediate activation.
+\end{definition}
+
+This definition is important: MaGRIP prunes structured FFN channels, not isolated scalar weights. Structured pruning yields real parameter and FLOP reduction after masks are hardened and the model is physically compacted.
+
+\section{Binary Masks and Relaxation}
+
+Let $z_{\ell,i}\in\{0,1\}$ indicate whether FFN unit $i$ in block $\ell$ is kept. For a gated FFN, define
+\begin{equation}
+  a_{\ell}^{\mathrm{gate}} = W_{\ell}^{\mathrm{gate}}h_{\ell},
+  \qquad
+  a_{\ell}^{\mathrm{up}} = W_{\ell}^{\mathrm{up}}h_{\ell},
+\end{equation}
+and apply a shared channel mask $z_{\ell}\in\{0,1\}^{m_{\ell}}$:
+\begin{equation}
+  \FFN_{\ell}(h_{\ell}; z_{\ell})
+  =
+  W_{\ell}^{\mathrm{down}}
+  \left[
+    z_{\ell}
+    \odot
+    \sigma\!\left(z_{\ell}\odot a_{\ell}^{\mathrm{gate}}\right)
+    \odot
+    \left(z_{\ell}\odot a_{\ell}^{\mathrm{up}}\right)
+  \right].
+  \label{eq:masked-gated-ffn}
+\end{equation}
+In practice, one multiplication by $z_{\ell}$ at the shared intermediate channel is sufficient if the implementation preserves the same structured dependency. Equation~\eqref{eq:masked-gated-ffn} makes the grouping explicit.
+
+The binary optimization problem is
+\begin{equation}
+  \min_{\theta, z}
+  \quad
+  \Loss_{\mathrm{task}}(\theta,z)
+  \quad
+  \mathrm{s.t.}
+  \quad
+  \Cost(z) \leq \rho \Cost(\bm{1}),
+  \qquad
+  z_{\ell,i}\in\{0,1\},
+  \label{eq:binary-constrained}
+\end{equation}
+where $\rho\in(0,1]$ is the target retained FFN budget.
+
+Since \eqref{eq:binary-constrained} is discrete, MaGRIP v2 introduces continuous mask logits $\phi_{\ell,i}\in\R$:
+\begin{equation}
+  q_{\ell,i} = \sigma(\phi_{\ell,i}/\tau),
+  \qquad
+  z_{\ell,i} = H(q_{\ell,i} - \kappa_{\ell}),
+  \label{eq:mask-relaxation}
+\end{equation}
+where $H$ is the Heaviside step function, $\tau$ is a temperature, and $\kappa_{\ell}$ is a threshold. Gradients through $H$ are approximated using a straight-through estimator (STE):
+\begin{equation}
+  \frac{\partial z_{\ell,i}}{\partial \phi_{\ell,i}}
+  \approx
+  \frac{\partial q_{\ell,i}}{\partial \phi_{\ell,i}}
+  =
+  \frac{1}{\tau}q_{\ell,i}(1-q_{\ell,i}).
+\end{equation}
+
+\section{Budget-Aware Objective}
+
+The constrained problem can be optimized through a Lagrangian-style objective:
+\begin{equation}
+  \Loss_{\mathrm{total}}(\theta,\phi)
+  =
+  \Loss_{\mathrm{task}}(\theta,z(\phi))
+  +
+  \lambda
+  \left(
+    \frac{\Cost(z(\phi))}{\Cost(\bm{1})} - \rho
+  \right)^2
+  +
+  \gamma \Omega(\phi)
+  +
+  \beta \Loss_{\mathrm{distill}}(\theta,z(\phi);\theta_0)
+  .
+  \label{eq:total-objective}
+\end{equation}
+The default hardware-friendly MaGRIP objective sets $\beta=0$. In that setting, pruning is driven by the task loss, the budget penalty, and mask regularization:
+\begin{equation}
+  \Loss_{\mathrm{default}}(\theta,\phi)
+  =
+  \Loss_{\mathrm{task}}(\theta,z(\phi))
+  +
+  \lambda
+  \left(
+    \frac{\Cost(z(\phi))}{\Cost(\bm{1})} - \rho
+  \right)^2
+  +
+  \gamma \Omega(\phi).
+  \label{eq:default-objective}
+\end{equation}
+
+Distillation is an optional stabilizer rather than a required part of MaGRIP. When enabled, $\theta_0$ is the original pretrained model, and $\Loss_{\mathrm{distill}}$ preserves behavior by matching masked-model outputs to original-model outputs:
+\begin{equation}
+  \Loss_{\mathrm{distill}}
+  =
+  \E_{x\sim\Data}
+  \left[
+    T_{\mathrm{kd}}^2
+    \KL
+    \left(
+      p_{\theta_0}(\cdot\mid x;T_{\mathrm{kd}})
+      \,\Vert\,
+      p_{\theta,z}(\cdot\mid x;T_{\mathrm{kd}})
+    \right)
+  \right].
+\end{equation}
+Naively computing this term requires a teacher forward pass and a student forward pass, which can be too expensive for large models. Therefore $\Loss_{\mathrm{distill}}$ should be implemented through one of the following modes:
+\begin{enumerate}[leftmargin=*]
+  \item disabled distillation, where $\beta=0$;
+  \item cached teacher logits or top-$k$ logits on a small calibration set;
+  \item cached hidden states or layer-level FFN outputs;
+  \item occasional teacher refreshes on CPU or separate evaluation hardware;
+  \item an exponential-moving-average teacher, which acts as a stability anchor rather than an exact copy of the original model.
+\end{enumerate}
+This keeps the mathematical option available without forcing MaGRIP v2 to keep two full LLMs resident on the same accelerator.
+
+$\Omega(\phi)$ may include entropy annealing, mask smoothness, or threshold regularization. A useful entropy term is
+\begin{equation}
+  \Omega_{\mathrm{entropy}}(\phi)
+  =
+  \sum_{\ell,i}
+  q_{\ell,i}(1-q_{\ell,i}),
+\end{equation}
+which is minimized when masks become nearly binary.
+
+\section{Parameter Cost for FFN Units}
+
+For a dense FFN unit in block $\ell$, removing one intermediate channel removes approximately
+\begin{equation}
+  c_{\ell,i}^{\mathrm{dense}}
+  =
+  d_{\ell}^{\mathrm{in}} + d_{\ell}^{\mathrm{out}}
+  +
+  c_{\mathrm{bias}}
+\end{equation}
+parameters, where $c_{\mathrm{bias}}$ accounts for optional biases.
+
+For a gated FFN unit with gate, up, and down projections, removing one channel removes approximately
+\begin{equation}
+  c_{\ell,i}^{\mathrm{gated}}
+  =
+  d_{\ell}^{\mathrm{in}}
+  +
+  d_{\ell}^{\mathrm{in}}
+  +
+  d_{\ell}^{\mathrm{out}}
+  +
+  c_{\mathrm{bias}}
+  =
+  2d_{\ell}^{\mathrm{in}} + d_{\ell}^{\mathrm{out}} + c_{\mathrm{bias}}.
+  \label{eq:gated-unit-cost}
+\end{equation}
+The total retained FFN cost is therefore
+\begin{equation}
+  \Cost(z)
+  =
+  \sum_{\ell}
+  \sum_{i=1}^{m_{\ell}}
+  c_{\ell,i}z_{\ell,i}.
+\end{equation}
+
+\section{Deriving the MaGRIP Saliency Score}
+
+MaGRIP uses activation magnitude and gradient sensitivity to estimate which structured FFN units can be removed with minimal loss increase. This section derives the saliency signal from a first-order Taylor approximation.
+
+Let $u_{\ell,i}$ be the post-activation intermediate value for FFN unit $i$ in block $\ell$. For a dense FFN,
+\begin{equation}
+  u_{\ell,i}
+  =
+  \sigma\!\left((W_{\ell}^{\mathrm{in}}h_{\ell})_i\right).
+\end{equation}
+For a gated FFN,
+\begin{equation}
+  u_{\ell,i}
+  =
+  \sigma(a_{\ell,i}^{\mathrm{gate}})
+  a_{\ell,i}^{\mathrm{up}}.
+\end{equation}
+The masked FFN uses $z_{\ell,i}u_{\ell,i}$. Removing unit $i$ corresponds to perturbing the intermediate activation by
+\begin{equation}
+  \Delta u_{\ell,i}
+  =
+  -u_{\ell,i}.
+\end{equation}
+
+For a single minibatch loss $\Loss$, a first-order Taylor expansion around the unpruned activation gives
+\begin{equation}
+  \Delta \Loss_{\ell,i}
+  \approx
+  \left\langle
+    \frac{\partial \Loss}{\partial u_{\ell,i}},
+    \Delta u_{\ell,i}
+  \right\rangle
+  =
+  -
+  \left\langle
+    \frac{\partial \Loss}{\partial u_{\ell,i}},
+    u_{\ell,i}
+  \right\rangle.
+\end{equation}
+Since the sign can vary across tokens and samples, an importance score should use magnitude:
+\begin{equation}
+  s_{\ell,i}^{\mathrm{grad}}
+  =
+  \E_{(x,y)\sim\Data}
+  \left[
+    \left|
+    \left\langle
+      \frac{\partial \Loss}{\partial u_{\ell,i}},
+      u_{\ell,i}
+    \right\rangle
+    \right|
+  \right].
+  \label{eq:first-order-saliency}
+\end{equation}
+When $u_{\ell,i}$ is a token-wise vector over batch and sequence positions, the inner product sums over those positions.
+
+\begin{proposition}[First-order pruning proxy]
+Under a local first-order approximation of $\Loss$ with respect to FFN intermediate activations, $s_{\ell,i}^{\mathrm{grad}}$ in \eqref{eq:first-order-saliency} estimates the absolute loss change caused by removing structured FFN unit $(\ell,i)$.
+\end{proposition}
+
+\begin{proof}
+Removal of unit $(\ell,i)$ replaces $u_{\ell,i}$ by $0$, so $\Delta u_{\ell,i}=-u_{\ell,i}$. The first-order Taylor expansion gives
+\[
+  \Loss(u+\Delta u)-\Loss(u)
+  =
+  \left\langle \nabla_{u_{\ell,i}}\Loss, \Delta u_{\ell,i}\right\rangle
+  +
+  O(\|\Delta u_{\ell,i}\|^2).
+\]
+Taking the absolute value of the leading term and averaging over $\Data$ gives \eqref{eq:first-order-saliency}.
+\end{proof}
+
+\subsection{Connection to Gradients With Respect to Masks}
+
+The same derivation explains why training masks using task loss is mathematically aligned with gradient-informed saliency. Consider a masked intermediate activation
+\begin{equation}
+  \widetilde{u}_{\ell,i}
+  =
+  z_{\ell,i}u_{\ell,i}.
+\end{equation}
+By the chain rule,
+\begin{equation}
+  \frac{\partial \Loss}{\partial z_{\ell,i}}
+  =
+  \left\langle
+    \frac{\partial \Loss}{\partial \widetilde{u}_{\ell,i}},
+    u_{\ell,i}
+  \right\rangle.
+  \label{eq:mask-gradient}
+\end{equation}
+Thus, the magnitude of the mask gradient is
+\begin{equation}
+  \left|
+  \frac{\partial \Loss}{\partial z_{\ell,i}}
+  \right|
+  =
+  \left|
+  \left\langle
+    \frac{\partial \Loss}{\partial \widetilde{u}_{\ell,i}},
+    u_{\ell,i}
+  \right\rangle
+  \right|.
+\end{equation}
+This is the same first-order sensitivity term used in \eqref{eq:first-order-saliency}. Therefore, MaGRIP v1's gradient-informed saliency can be interpreted as a frozen-model estimate of the gradient signal that MaGRIP v2 will use directly when optimizing relaxed masks.
+
+Magnitude-only saliency is a coarser proxy:
+\begin{equation}
+  s_{\ell,i}^{\mathrm{mag}}
+  =
+  \E_{x\sim\Data}
+  \left[
+    \|u_{\ell,i}(x)\|_2
+  \right].
+  \label{eq:magnitude-saliency}
+\end{equation}
+It assumes that channels with low activation energy are less likely to affect the output. Gradient-informed saliency corrects this by incorporating local task sensitivity.
+
+The MaGRIP v2 score can combine both:
+\begin{equation}
+  s_{\ell,i}^{\mathrm{MaGRIP}}
+  =
+  \alpha_{\mathrm{mag}}
+  \frac{s_{\ell,i}^{\mathrm{mag}}}{\mathrm{median}(s_{\ell}^{\mathrm{mag}})+\epsilon}
+  +
+  \alpha_{\mathrm{grad}}
+  \frac{s_{\ell,i}^{\mathrm{grad}}}{\mathrm{median}(s_{\ell}^{\mathrm{grad}})+\epsilon}.
+  \label{eq:magrip-score}
+\end{equation}
+The normalization is layer-local by default so that layers with different activation scales do not dominate the global budget.
+
+\section{Why Saliency Must Be Recomputed When Weights Move}
+
+In MaGRIP v1, $\theta$ was frozen, so saliency was estimated for a fixed function $f_{\theta_0}$. In MaGRIP v2, if the weights are updated, saliency becomes state-dependent:
+\begin{equation}
+  s_{\ell,i} = s_{\ell,i}(\theta,z;\Data).
+\end{equation}
+Therefore, a one-time saliency ranking is not theoretically stable under weight adaptation. A channel that is low-saliency under $\theta_0$ may become important after neighboring channels are pruned and the model adapts; conversely, a channel initially important may become redundant.
+
+This motivates a dynamic pruning view: masks and weights should usually co-evolve, but masks should move on a controlled time scale. The saliency estimate supplies a good initialization and a periodic diagnostic, not a fixed global ranking.
+
+The idealized joint update is
+\begin{align}
+  \theta_{t+1}
+  &=
+  \theta_t
+  -
+  \eta_{\theta,t}
+  \mathcal{A}_{\theta}
+  \left(
+    \nabla_{\theta}\Loss_{\mathrm{total}}(\theta_t,\phi_t)
+  \right),
+  \label{eq:joint-theta-update}
+  \\
+  \phi_{t+1}
+  &=
+  \phi_t
+  -
+  \eta_{\phi,t}
+  \mathcal{A}_{\phi}
+  \left(
+    \nabla_{\phi}\Loss_{\mathrm{total}}(\theta_t,\phi_t)
+  \right).
+  \label{eq:joint-phi-update}
+\end{align}
+Here $\mathcal{A}_{\theta}$ may be APOLLO/APOLLO-Mini and $\mathcal{A}_{\phi}$ may be AdamW or another small-state optimizer. The schedules $\eta_{\theta,t}$, $\eta_{\phi,t}$, $\lambda_t$, $\rho_t$, and $\tau_t$ determine whether the system behaves like mask discovery, joint adaptation, or final recovery.
+
+\section{Convergence Strategy}
+
+MaGRIP v2 should optimize weights and masks inclusively rather than treating pruning and recovery as completely separate algorithms. The recommended strategy is two-time-scale joint optimization: model weights and mask logits are updated in the same training process, but pruning pressure and mask movement are scheduled carefully.
+
+\subsection{Stage 0: Saliency Warm Start}
+
+Set $\theta=\theta_0$ and compute $s_{\ell,i}^{\mathrm{mag}}$ and $s_{\ell,i}^{\mathrm{grad}}$ on a calibration set. Initialize $\phi$ so that high-saliency units have larger keep probability:
+\begin{equation}
+  \phi_{\ell,i}^{(0)}
+  =
+  a
+  \left(
+    \frac{s_{\ell,i}^{\mathrm{MaGRIP}}-\mu_{\ell}}{\sigma_{\ell}+\epsilon}
+  \right),
+\end{equation}
+where $a>0$ controls sharpness and $(\mu_{\ell},\sigma_{\ell})$ are layer-local statistics.
+
+\subsection{Stage 1: Joint Soft-Mask Adaptation}
+
+Train $\theta$ and $\phi$ together using \eqref{eq:total-objective}, with $\beta=0$ unless a cheap teacher signal is available. The mask remains soft enough for gradient flow:
+\begin{equation}
+  q_{\ell,i,t}=\sigma(\phi_{\ell,i,t}/\tau_t),
+  \qquad
+  z_{\ell,i,t}=H(q_{\ell,i,t}-\kappa_{\ell,t})
+\end{equation}
+with an STE backward pass.
+
+The budget should be introduced gradually. One useful schedule is to anneal the target retained budget from no pruning to the desired budget:
+\begin{equation}
+  \rho_t
+  =
+  1
+  -
+  (1-\rho_{\star})
+  \min\left(1,\frac{t}{T_{\rho}}\right),
+\end{equation}
+while increasing the budget penalty:
+\begin{equation}
+  \lambda_t
+  =
+  \lambda_{\max}
+  \min\left(1,\frac{t}{T_{\lambda}}\right),
+\end{equation}
+where $\rho_{\star}$ is the final retained budget. This lets weights adapt as capacity is slowly removed.
+
+\subsection{Two-Time-Scale Updates}
+
+The weight optimizer should usually update every step, while mask updates should be slower, clipped, or less frequent:
+\begin{equation}
+  \eta_{\phi,t} \ll \eta_{\theta,t}
+  \quad\mathrm{or}\quad
+  \phi_{t+1}=\phi_t
+  \quad\mathrm{for\ most\ adaptation\ steps}.
+\end{equation}
+This gives the model time to redistribute function before masks remove channels permanently. A practical update rule is
+\begin{equation}
+  \|\Delta \phi_t\|_{\infty}
+  \leq
+  \delta_{\phi,t},
+  \qquad
+  \delta_{\phi,t}\downarrow 0
+  \quad\mathrm{near\ hardening}.
+\end{equation}
+
+\subsection{Stage 2: Mask Stabilization}
+
+Once the retained budget approaches $\rho_{\star}$, mask updates should slow down or pause while $\theta$ continues adapting. This is not a separate theoretical objective; it is a stabilization regime of the same joint objective:
+\begin{equation}
+  \eta_{\phi,t}\rightarrow 0,
+  \qquad
+  \eta_{\theta,t}>0,
+  \qquad
+  \lambda_t=\lambda_{\max},
+  \qquad
+  \rho_t=\rho_{\star}.
+\end{equation}
+During this stage, $\tau_t$ should decrease so masks become more decisive:
+\begin{equation}
+  \tau_t
+  =
+  \max(\tau_{\min}, \tau_0 \alpha_{\tau}^{t}),
+  \qquad
+  0<\alpha_{\tau}<1.
+\end{equation}
+
+\subsection{Stage 3: Hardening and Structural Compaction}
+
+After convergence, set
+\begin{equation}
+  z_{\ell,i}^{\star}
+  =
+  \mathbf{1}\{q_{\ell,i} \geq \kappa_{\ell}\},
+\end{equation}
+then physically remove the corresponding FFN rows and columns.
+
+\subsection{Stage 4: Final Recovery}
+
+After compaction, run a short weight-only adaptation pass:
+\begin{equation}
+  \theta_{t+1}
+  =
+  \theta_t
+  -
+  \eta_{\theta,t}
+  \mathcal{A}_{\theta}
+  \left(
+    \nabla_{\theta}
+    \left[
+      \Loss_{\mathrm{task}}
+      +
+      \beta\Loss_{\mathrm{distill}}
+    \right]
+  \right),
+\end{equation}
+where $\beta$ again remains optional. APOLLO is the preferred backend for this stage when AdamW optimizer state is too large.
+
+\subsection{Convergence Interpretation}
+
+Because transformer training is nonconvex and the binary mask relaxation uses an STE, MaGRIP v2 should not claim a formal global convergence guarantee. The mathematical claim is more modest: the objective in \eqref{eq:total-objective} defines a differentiable surrogate for budget-constrained structured pruning, and the schedules above reduce instability by preventing abrupt capacity removal. The practical convergence criteria should be validation loss, retained budget, mask stability, and the fraction of masks whose binary decisions change over a fixed window.
+
+\section{Role of APOLLO in MaGRIP v2}
+
+APOLLO is relevant because MaGRIP v2 wants to adapt $\theta$ after pruning, but full AdamW adaptation can be memory-prohibitive. The APOLLO paper reformulates AdamW as structured gradient scaling. Given a weight matrix $W_t\in\R^{m\times n}$ and gradient $G_t$, AdamW can be viewed as
+\begin{equation}
+  W_{t+1}
+  =
+  W_t
+  -
+  \eta
+  \left(
+    S_t \odot G_t
+  \right),
+\end{equation}
+where $S_t$ is an adaptive element-wise scaling factor derived from first and second moments.
+
+APOLLO coarsens this scaling into a channel-wise form:
+\begin{equation}
+  \widetilde{G}_t
+  =
+  G_t\diag(s_t),
+  \qquad
+  s_{t,j}
+  =
+  \frac{\|\widehat{G}_t[:,j]\|_2}{\|G_t[:,j]\|_2+\epsilon},
+\end{equation}
+where $\widehat{G}_t$ is the AdamW-like moment-normalized gradient. Instead of storing full-rank moments, APOLLO projects gradients into a lower-dimensional space:
+\begin{equation}
+  R_t = P_tG_t,
+  \qquad
+  P_t\in\R^{r\times m},
+  \qquad
+  (P_t)_{ij}\sim\mathcal{N}(0,1/r).
+\end{equation}
+Moments are maintained for $R_t$, and channel-wise scaling is estimated from the projected moments.
+
+The useful theoretical point for MaGRIP is norm preservation under random projection. For a fixed vector $x$,
+\begin{equation}
+  \Pr
+  \left[
+    (1-\epsilon)\|x\|_2^2
+    \leq
+    \|Px\|_2^2
+    \leq
+    (1+\epsilon)\|x\|_2^2
+  \right]
+  \geq
+  1 - 2\exp\left(-\frac{r\epsilon^2}{8}\right).
+\end{equation}
+This gives APOLLO a principled way to approximate structured gradient scaling with lower optimizer memory.
+
+For MaGRIP, APOLLO should be treated as the weight optimizer backend for the $\theta$ update in \eqref{eq:joint-theta-update}; it should not be entangled with FFN discovery, mask parameterization, or saliency computation. This separation keeps the pruning theory independent from the adaptation optimizer.
+
+\section{Joint Optimization With Separate Optimizers}
+
+MaGRIP v2 should maintain separate parameter sets:
+\begin{equation}
+  \Theta_{\mathrm{model}} = \{\theta\},
+  \qquad
+  \Theta_{\mathrm{mask}} = \{\phi,\kappa\}.
+\end{equation}
+The model weights and masks should use separate optimizers even when they are trained in the same loop:
+\begin{align}
+  \theta_{t+1}
+  &=
+  \theta_t
+  -
+  \eta_{\theta}
+  \mathcal{A}_{\mathrm{APOLLO}}
+  \left(
+    \nabla_{\theta}\Loss_{\mathrm{total}}
+  \right),
+  \\
+  \phi_{t+1}
+  &=
+  \phi_t
+  -
+  \eta_{\phi}
+  \mathcal{A}_{\mathrm{mask}}
+  \left(
+    \nabla_{\phi}\Loss_{\mathrm{total}}
+  \right).
+\end{align}
+A practical default is APOLLO or APOLLO-Mini for $\theta$ and AdamW for $\phi,\kappa$.
+
+\begin{remark}
+The mask optimizer should usually have its own schedule, gradient clipping, and update frequency. Early in joint adaptation, it may move enough to discover a sparse structure; near hardening, it should slow down or pause while weights recover.
+\end{remark}
+
+\section{Theoretical Assumptions and Limits}
+
+\begin{assumption}[Local smoothness]
+The loss is locally smooth with respect to FFN intermediate activations and model weights during the soft-mask optimization regime.
+\end{assumption}
+
+\begin{assumption}[Representative calibration data]
+The calibration/adaptation data used to estimate saliency is representative enough that low expected first-order loss change on $\Data$ correlates with low degradation on evaluation distributions.
+\end{assumption}
+
+\begin{assumption}[Structured redundancy]
+Transformer FFN intermediate dimensions contain redundant or compressible channels, so a sparse subset can approximate the original function after limited adaptation.
+\end{assumption}
+
+These assumptions are realistic but not guaranteed. MaGRIP can fail when the calibration set is too small, the target pruning ratio is too aggressive, masks are hardened too early, or weight adaptation changes saliency faster than masks can stabilize.
+
+\section{Default Research Protocol}
+
+\begin{enumerate}[leftmargin=*]
+  \item Evaluate the unpruned model on a held-out validation set.
+  \item Discover prunable FFN units only inside transformer blocks.
+  \item Estimate magnitude and gradient saliency on calibration data.
+  \item Initialize mask logits from saliency.
+  \item Jointly train weights and soft masks with APOLLO for $\theta$ and a separate optimizer for $\phi,\kappa$.
+  \item Anneal the retained budget $\rho_t$, budget pressure $\lambda_t$, and mask temperature $\tau_t$.
+  \item Slow or pause mask updates once the target budget is reached.
+  \item Harden masks and physically compact FFN weights.
+  \item Run a short weight-only APOLLO recovery pass.
+  \item Recompute saliency during training as a diagnostic and optional reinitialization signal.
+  \item Run final evaluation: perplexity, task accuracy, retained parameters, retained FLOPs, latency, and memory.
+\end{enumerate}
+
+\section{Open Questions}
+
+\begin{enumerate}[leftmargin=*]
+  \item Should MaGRIP use one global budget, per-layer budgets, or a hybrid schedule?
+  \item Should the saliency score use $|u_i\,\partial\Loss/\partial u_i|$, $|\partial\Loss/\partial z_i|$, or both?
+  \item What mask update frequency best balances stability and pruning speed?
+  \item Should APOLLO adaptation update all model weights or only FFN weights near pruned modules?
+  \item Should final recovery use task loss only, cached distillation, or another lightweight teacher signal?
+  \item How should MoE FFNs be handled: skip experts, prune inside experts, or prune expert routing separately?
+\end{enumerate}
+
+\section{References}
+
+\begin{itemize}[leftmargin=*]
+  \item Hanqing Zhu, Zhenyu Zhang, Wenyan Cong, Xi Liu, Sem Park, Vikas Chandra, Bo Long, David Z. Pan, Zhangyang Wang, Jinwon Lee. \emph{APOLLO: SGD-like Memory, AdamW-level Performance}. MLSys 2025.
+  \item Ji Lin et al. \emph{Structured Pruning and Sparsity in Neural Networks}. General background for structured pruning.
+  \item Song Han, Jeff Pool, John Tran, William Dally. \emph{Learning both Weights and Connections for Efficient Neural Networks}. NeurIPS 2015.
+  \item Elias Frantar, Saleh Ashkboos, Torsten Hoefler, Dan Alistarh. \emph{SparseGPT: Massive Language Models Can Be Accurately Pruned in One-Shot}. ICML 2023.
+  \item Tim Dettmers, Artidoro Pagnoni, Ari Holtzman, Luke Zettlemoyer. \emph{QLoRA: Efficient Finetuning of Quantized LLMs}. NeurIPS 2023.
+\end{itemize}
+
+\end{document}
