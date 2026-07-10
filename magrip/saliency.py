@@ -67,23 +67,24 @@ def collect_saliency(
     for param in model.parameters():
         param.requires_grad_(True)
 
-    activations: dict[str, Tensor] = {}
+    activations: dict[tuple[str, str], Tensor] = {}
     handles = []
 
-    def make_hook(key: str):
+    def make_hook(target_key: str, module_path: str):
         def hook(module: object, inputs: tuple[object, ...], output: Tensor) -> Tensor:
             output.retain_grad()
-            activations[key] = output
+            activations[(target_key, module_path)] = output
             return output
 
         return hook
 
     try:
         for target in targets:
-            if len(target.expand_module_paths) != 1:
-                raise NotImplementedError("M1 saliency supports single-branch dense FFNs only.")
-            module = get_module_by_path(model, target.expand_module_paths[0])
-            handles.append(module.register_forward_hook(make_hook(target.ffn_path)))
+            for module_path in target.expand_module_paths:
+                module = get_module_by_path(model, module_path)
+                handles.append(
+                    module.register_forward_hook(make_hook(target.ffn_path, module_path))
+                )
 
         model.zero_grad(set_to_none=True)
         outputs = model(input_ids=input_ids, labels=labels)
@@ -93,12 +94,22 @@ def collect_saliency(
         magnitude: dict[str, Tensor] = {}
         gradient: dict[str, Tensor] = {}
         for target in targets:
-            activation = activations[target.ffn_path]
-            grad = activation.grad
-            if grad is None:
-                raise RuntimeError(f"No activation gradient captured for {target.ffn_path}.")
-            magnitude[target.ffn_path] = activation.detach().norm(dim=(0, 1))
-            gradient[target.ffn_path] = (activation.detach() * grad.detach()).abs().sum(dim=(0, 1))
+            branch_magnitude = []
+            branch_gradient = []
+            for module_path in target.expand_module_paths:
+                activation = activations[(target.ffn_path, module_path)]
+                grad = activation.grad
+                if grad is None:
+                    raise RuntimeError(
+                        f"No activation gradient captured for {target.ffn_path} "
+                        f"branch {module_path}."
+                    )
+                branch_magnitude.append(activation.detach().norm(dim=(0, 1)))
+                branch_gradient.append(
+                    (activation.detach() * grad.detach()).abs().sum(dim=(0, 1))
+                )
+            magnitude[target.ffn_path] = torch.stack(branch_magnitude, dim=0).mean(dim=0)
+            gradient[target.ffn_path] = torch.stack(branch_gradient, dim=0).mean(dim=0)
     finally:
         for handle in handles:
             handle.remove()

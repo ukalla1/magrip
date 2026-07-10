@@ -1,9 +1,10 @@
-"""Run a small GPT-2 dense-FFN MaGRIP smoke test."""
+"""Run a small MaGRIP smoke test for dense or gated FFN causal LMs."""
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 import time
 
@@ -17,14 +18,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--save-baseline", action="store_true")
+    parser.add_argument("--no-cache-baseline", action="store_true")
     parser.add_argument("--models-dir", default="models")
     parser.add_argument("--output-dir", default="outputs/runs")
     parser.add_argument("--run-name", default=None)
     parser.add_argument("--calibration-source", choices=("dataset", "text"), default="dataset")
-    parser.add_argument("--dataset-name", default="wikitext")
+    parser.add_argument("--dataset-name", default="Salesforce/wikitext")
     parser.add_argument("--dataset-config", default="wikitext-2-raw-v1")
     parser.add_argument("--dataset-split", default="validation")
     parser.add_argument("--text-column", default="text")
+    parser.add_argument("--hf-token-env", default="HF_TOKEN")
     parser.add_argument(
         "--text",
         default=(
@@ -51,7 +54,8 @@ def main() -> None:
     from magrip.discovery import discover_ffn_targets
     from magrip.logging import RunLogger, cuda_memory_snapshot, system_info, tensor_stats
 
-    run_name = args.run_name or time.strftime("gpt2_smoke_%Y%m%d_%H%M%S")
+    model_slug = args.model_name.replace("/", "__")
+    run_name = args.run_name or time.strftime(f"{model_slug}_magrip_smoke_%Y%m%d_%H%M%S")
     run_dir = Path(args.output_dir) / run_name
     logger = RunLogger(run_dir)
     device = torch.device(args.device)
@@ -65,18 +69,38 @@ def main() -> None:
         cuda_memory=cuda_memory_snapshot(),
     )
 
+    models_dir = Path(args.models_dir)
+    baseline_dir = models_dir / "Baselines" / model_slug
+    should_cache_baseline = not args.no_cache_baseline or args.save_baseline
+    baseline_cache_hit = baseline_dir.exists()
+    token = os.environ.get(args.hf_token_env)
+    auth_kwargs = {"token": token} if token else {}
+
     load_start = time.perf_counter()
-    tokenizer = AutoTokenizer.from_pretrained(args.model_name)
+    load_source = baseline_dir if baseline_cache_hit else args.model_name
+    tokenizer = AutoTokenizer.from_pretrained(load_source, **auth_kwargs)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    model = AutoModelForCausalLM.from_pretrained(args.model_name)
+    model = AutoModelForCausalLM.from_pretrained(load_source, **auth_kwargs)
     model.to(device)
     model.eval()
+    baseline_saved_after_download = False
+    if should_cache_baseline and not baseline_cache_hit:
+        baseline_dir.mkdir(parents=True, exist_ok=True)
+        model.save_pretrained(baseline_dir)
+        tokenizer.save_pretrained(baseline_dir)
+        baseline_saved_after_download = True
     logger.log(
         "model_loaded",
         elapsed_seconds=time.perf_counter() - load_start,
         model_name=args.model_name,
+        load_source=str(load_source),
+        baseline_cache_dir=baseline_dir,
+        baseline_cache_hit=baseline_cache_hit,
+        baseline_saved_after_download=baseline_saved_after_download,
+        hf_token_env=args.hf_token_env,
+        hf_token_present=bool(token),
         parameter_count=count_parameters(model),
         trainable_parameter_count=count_trainable_parameters(model),
         tokenizer_vocab_size=len(tokenizer),
@@ -157,17 +181,11 @@ def main() -> None:
         cuda_memory=cuda_memory_snapshot(),
     )
 
-    model_slug = args.model_name.replace("/", "__")
-    models_dir = Path(args.models_dir)
-    baseline_dir = models_dir / "Baselines" / model_slug
     pruned_dir = models_dir / "Pruned" / f"{model_slug}_magrip_smoke"
     pruned_dir.mkdir(parents=True, exist_ok=True)
 
-    if args.save_baseline:
-        baseline_dir.mkdir(parents=True, exist_ok=True)
-        model.save_pretrained(baseline_dir)
-        tokenizer.save_pretrained(baseline_dir)
-        logger.log("baseline_saved", path=baseline_dir)
+    if should_cache_baseline:
+        logger.log("baseline_cache_available", path=baseline_dir)
 
     torch.save(
         {
@@ -196,6 +214,13 @@ def main() -> None:
     manifest = {
         "model_name": args.model_name,
         "retained_ratio": args.retained_ratio,
+        "baseline_cache": {
+            "enabled": should_cache_baseline,
+            "path": str(baseline_dir),
+            "load_source": str(load_source),
+            "hit": baseline_cache_hit,
+            "saved_after_download": baseline_saved_after_download,
+        },
         "calibration": {
             "source": args.calibration_source,
             "dataset_name": args.dataset_name if args.calibration_source == "dataset" else None,
@@ -210,11 +235,8 @@ def main() -> None:
         },
         "run_dir": str(run_dir),
         "pruned_dir": str(pruned_dir),
-        "baseline_dir": str(baseline_dir) if args.save_baseline else None,
-        "targets": [
-            target_to_dict(target)
-            for target in result.targets
-        ],
+        "baseline_dir": str(baseline_dir) if should_cache_baseline else None,
+        "targets": [target_to_dict(target) for target in result.targets],
         "baseline_loss": result.baseline_loss,
         "masked_loss": result.masked_loss,
         "baseline_perplexity": result.baseline_perplexity,

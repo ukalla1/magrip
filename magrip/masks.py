@@ -36,7 +36,7 @@ class StructuredMask:
 
     @property
     def active_channels(self) -> int:
-        return int(self.values.detach().sum().item())
+        return int((self.values.detach() > 0.5).count_nonzero().item())
 
     @property
     def total_channels(self) -> int:

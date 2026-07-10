@@ -36,6 +36,7 @@ magrip/
 scripts/
   inspect_model.py
   run_magrip.py
+  run_magrip_smoke.py
   run_gpt2_smoke.py
   compact_model.py
 tests/
@@ -69,13 +70,14 @@ models/
 
 - [x] Copy the useful algorithmic pieces from `magrip_v1.py` into isolated modules.
 - [x] Remove notebook-only commands, hardcoded tokens, global constants, and plotting side effects.
-- [ ] Recreate the v1 Gemma path as a compatibility baseline.
+- [x] Add gated FFN discovery, shared masks, and branch-averaged saliency.
+- [x] Validate Gemma/gated smoke run artifacts.
 - [x] Add a GPT-2 smoke test for the dense-FFN baseline.
 - [x] Use WikiText-2 validation as the default small calibration dataset for smoke tests.
 - [x] Validate GPT-2 dense smoke run artifacts: discovery, saliency, masks, metrics, and logs.
 - [x] Record expected v1 assumptions: gated FFN, shared intermediate mask, frozen weights.
 
-M1 starts with GPT-2 because it has a small dense FFN path. Smoke tests use WikiText-2 validation by default so saliency is estimated from a small dataset rather than a single sentence. The GPT-2 dense baseline is validated by `outputs/runs/gpt2_smoke_20260710_001150`. The Gemma/gated path remains the next compatibility target and will share the same mask and saliency abstractions across multiple FFN branches.
+M1 is complete. The GPT-2 dense baseline is validated by `outputs/runs/gpt2_smoke_20260710_001150`, and the Gemma gated baseline is validated by `outputs/runs/gpt2_smoke_20260710_121506`. Smoke tests use WikiText-2 validation by default so saliency is estimated from a small dataset rather than a single sentence.
 
 ### M2: FFN Discovery and Topology Registry
 
@@ -84,6 +86,9 @@ M1 starts with GPT-2 because it has a small dense FFN path. Smoke tests use Wiki
 - [ ] Detect dense FFNs, gated FFNs, and branched FFNs from module shapes and names.
 - [ ] Detect MoE blocks and skip them with a clear warning in v2.
 - [ ] Add `FFNTarget` and `FFNTopology` data structures.
+- [ ] Move M1 dense/gated discovery heuristics into an extensible topology registry.
+- [ ] Add topology sanity checks for saliency length, mask length, and expected channel count.
+- [ ] Add artifact validation checks for dense and gated smoke runs.
 - [ ] Write discovery tests using small synthetic transformer blocks.
 - [ ] Write model inspection output that explains what MaGRIP will prune before training starts.
 
