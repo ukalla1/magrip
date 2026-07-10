@@ -59,6 +59,7 @@ def main() -> None:
     )
     from magrip.discovery import discover_ffn_targets
     from magrip.logging import RunLogger, cuda_memory_snapshot, system_info, tensor_stats
+    from magrip.masks import save_mask_state, total_mask_cost
 
     model_slug = args.model_name.replace("/", "__")
     run_name = args.run_name or time.strftime(f"{model_slug}_magrip_smoke_%Y%m%d_%H%M%S")
@@ -195,17 +196,26 @@ def main() -> None:
 
     torch.save(
         {
-            key: mask.values.detach().cpu()
+            key: mask.binary_values.detach().cpu()
             for key, mask in result.masks.items()
         },
         pruned_dir / "masks.pt",
     )
+    save_mask_state(pruned_dir / "mask_state.pt", result.masks)
+    aggregate_mask_cost = total_mask_cost(result.masks)
     mask_summaries = {
         key: {
             "active_channels": mask.active_channels,
             "total_channels": mask.total_channels,
             "retained_ratio": mask.retained_ratio,
-            "values": tensor_stats(mask.values),
+            "full_cost": mask.cost_summary.full_cost,
+            "retained_cost": mask.cost_summary.retained_cost,
+            "cost_retained_ratio": mask.cost_summary.retained_ratio,
+            "full_flop_cost": mask.cost_summary.full_flop_cost,
+            "retained_flop_cost": mask.cost_summary.retained_flop_cost,
+            "flop_cost_retained_ratio": mask.cost_summary.flop_retained_ratio,
+            "values": tensor_stats(mask.binary_values),
+            "probabilities": tensor_stats(mask.probabilities),
         }
         for key, mask in result.masks.items()
     }
@@ -249,12 +259,25 @@ def main() -> None:
         "masked_perplexity": result.masked_perplexity,
         "loss_delta": result.masked_loss - result.baseline_loss,
         "perplexity_delta": result.masked_perplexity - result.baseline_perplexity,
+        "mask_cost": {
+            "full_cost": aggregate_mask_cost.full_cost,
+            "retained_cost": aggregate_mask_cost.retained_cost,
+            "retained_ratio": aggregate_mask_cost.retained_ratio,
+            "full_flop_cost": aggregate_mask_cost.full_flop_cost,
+            "retained_flop_cost": aggregate_mask_cost.retained_flop_cost,
+            "flop_retained_ratio": aggregate_mask_cost.flop_retained_ratio,
+        },
         "mask_summaries": mask_summaries,
         "saliency_summaries": saliency_summaries,
         "elapsed_seconds": time.perf_counter() - wall_start,
     }
     (pruned_dir / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
-    logger.log("artifacts_saved", pruned_dir=pruned_dir, mask_file=pruned_dir / "masks.pt")
+    logger.log(
+        "artifacts_saved",
+        pruned_dir=pruned_dir,
+        mask_file=pruned_dir / "masks.pt",
+        mask_state_file=pruned_dir / "mask_state.pt",
+    )
     logger.write_summary(manifest)
 
     print(json.dumps(manifest, indent=2))
@@ -276,6 +299,7 @@ def target_to_dict(target: object) -> dict[str, object]:
         "block_path": target.block_path,
         "ffn_path": target.ffn_path,
         "topology": target.topology.value,
+        "registry_name": target.registry_name,
         "expand_module_paths": list(target.expand_module_paths),
         "contract_module_paths": list(target.contract_module_paths),
         "intermediate_size": target.intermediate_size,

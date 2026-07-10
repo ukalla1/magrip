@@ -13,6 +13,8 @@ The current focus is topology-aware FFN discovery and smoke-test validation. The
 - M1 Gemma/gated frozen-pruning baseline: validated.
 - M2 FFN discovery registry: implemented for common dense and gated transformer FFNs.
 - M2 artifact validation: available for smoke-run summaries.
+- M3 mask system: implemented with structured masks, STE-ready logits, cost accounting,
+  and serialization.
 
 ## Default Assumptions
 
@@ -49,6 +51,13 @@ Each run also writes structured logs under `outputs/runs/<run-name>/`:
 - `events.jsonl`: timestamped events for loading, target discovery, pruning, metrics, and artifacts.
 - `summary.json`: final manifest with loss/perplexity deltas, mask stats, and saliency stats.
 
+The pruned artifact directory also includes:
+
+- `masks.pt`: binary mask tensors for quick inspection.
+- `mask_state.pt`: reloadable structured masks with logits, thresholds, temperatures, and
+  channel-cost metadata.
+- `summary.json`: aggregate retained FFN parameter and FLOP-cost ratios under `mask_cost`.
+
 Both `models/` outputs and `outputs/` logs are ignored by git by default.
 
 Validated M1 reference runs:
@@ -82,6 +91,13 @@ Validate existing smoke artifacts with:
 ```bash
 python scripts/validate_smoke_artifact.py outputs/runs/gpt2_smoke_20260710_001150/summary.json --expected-topology dense
 python scripts/validate_smoke_artifact.py outputs/runs/gpt2_smoke_20260710_121506/summary.json --expected-topology gated
+```
+
+Inspect saved structured mask artifacts with:
+
+```bash
+python scripts/inspect_mask_state.py models/Pruned/gpt2_magrip_smoke --strict
+python scripts/inspect_mask_state.py models/Pruned/google__gemma-2b_magrip_smoke --strict
 ```
 
 ## Gated FFN Smoke Test

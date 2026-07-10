@@ -49,6 +49,7 @@ docs/
   THEORY.tex
   V1_BASELINE.md
   FFN_DISCOVERY.md
+  MASK_SYSTEM.md
   APOLLO_INTEGRATION.md
   EXPERIMENTS.md
 models/
@@ -96,12 +97,15 @@ M2 is complete. Discovery is now registry-backed, restricted to known repeated t
 
 ### M3: Mask System
 
-- [ ] Implement structured FFN channel masks.
-- [ ] Support shared intermediate masks for gated FFNs.
-- [ ] Implement soft mask logits, binary hard masks, STE behavior, and temperature schedules.
-- [ ] Add parameter/FLOP cost accounting from discovered topology, not hardcoded hidden sizes.
-- [ ] Add mask serialization and reload support.
-- [ ] Add tests for mask shapes, broadcast behavior, and cost calculation.
+- [x] Implement structured FFN channel masks.
+- [x] Support shared intermediate masks for gated FFNs.
+- [x] Implement soft mask logits, binary hard masks, STE behavior, and temperature schedules.
+- [x] Add parameter/FLOP cost accounting from discovered topology, not hardcoded hidden sizes.
+- [x] Add mask serialization and reload support.
+- [x] Add tests for mask shapes, broadcast behavior, and cost calculation.
+- [x] Inspect dense and gated M3 smoke results for technical correctness.
+
+M3 is complete. The smoke path still preserves M1 frozen-mask behavior, but masks are now represented by topology-aware `StructuredMask` objects with logits, temperatures, STE-compatible hard values, serialization, and model-derived FFN channel costs.
 
 ### M4: Saliency System
 
@@ -111,6 +115,7 @@ M2 is complete. Discovery is now registry-backed, restricted to known repeated t
 - [ ] Add saliency recomputation hooks during joint training.
 - [ ] Add diagnostics for saliency drift as weights adapt.
 - [ ] Add tests that compare mask-gradient saliency with explicit mask gradients on toy modules.
+- [ ] Inspect saliency-system results for technical correctness on dense and gated smoke runs.
 
 ### M5: Objectives and Training Loop
 
@@ -122,6 +127,7 @@ M2 is complete. Discovery is now registry-backed, restricted to known repeated t
 - [ ] Add gradient clipping for mask parameters.
 - [ ] Add stabilization stage and final weight-only recovery stage.
 - [ ] Add checkpointing for model weights, masks, optimizer states, and run config.
+- [ ] Inspect objective/training-loop results for technical correctness on dense and gated smoke runs.
 
 ### M6: APOLLO Integration
 
@@ -131,6 +137,7 @@ M2 is complete. Discovery is now registry-backed, restricted to known repeated t
 - [ ] Add configuration for APOLLO rank, scale, projection update gap, and mini mode.
 - [ ] Add fallback to AdamW for small CPU/GPU tests.
 - [ ] Document memory tradeoffs in `docs/APOLLO_INTEGRATION.md`.
+- [ ] Inspect APOLLO integration results for technical correctness against the AdamW fallback.
 
 ### M7: Structural Compaction
 
@@ -139,6 +146,7 @@ M2 is complete. Discovery is now registry-backed, restricted to known repeated t
 - [ ] Compact gated FFNs by removing aligned gate/up rows and down columns.
 - [ ] Verify compacted model logits match masked model logits within tolerance.
 - [ ] Save compacted model and tokenizer in Hugging Face format.
+- [ ] Inspect compacted dense and gated model artifacts for technical correctness.
 
 ### M8: Evaluation and Experiment Tracking
 
@@ -147,6 +155,7 @@ M2 is complete. Discovery is now registry-backed, restricted to known repeated t
 - [ ] Add experiment configs for tiny, small, and target-scale models.
 - [ ] Track run artifacts in a predictable output directory.
 - [ ] Maintain `docs/EXPERIMENTS.md` with results and lessons learned.
+- [ ] Inspect evaluation and experiment-tracking outputs for technical correctness.
 
 ## Implementation Sequence
 

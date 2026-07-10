@@ -54,7 +54,12 @@ def run_frozen_pruning_baseline(
 
     baseline_loss = causal_lm_loss(model, input_ids=input_ids, labels=labels)
     saliency = collect_saliency(model, targets=targets, input_ids=input_ids, labels=labels)
-    masks = masks_from_saliency(saliency.combined(), targets=targets, retained_ratio=retained_ratio)
+    masks = masks_from_saliency(
+        saliency.combined(),
+        targets=targets,
+        retained_ratio=retained_ratio,
+        model=model,
+    )
     masked_loss = causal_lm_loss(model, input_ids=input_ids, labels=labels, masks=masks)
 
     return FrozenPruningResult(
@@ -102,6 +107,7 @@ def run_frozen_pruning_baseline_on_batches(
         accumulated_saliency.combined(),
         targets=targets,
         retained_ratio=retained_ratio,
+        model=model,
     )
     masked_losses = [
         causal_lm_loss(model, input_ids=batch, labels=batch, masks=masks)

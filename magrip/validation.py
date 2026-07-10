@@ -53,7 +53,10 @@ def validate_targets(targets: list[FFNTarget]) -> ValidationResult:
     return result
 
 
-def validate_smoke_summary(path: str | Path, expected_topology: str | None = None) -> ValidationResult:
+def validate_smoke_summary(
+    path: str | Path,
+    expected_topology: str | None = None,
+) -> ValidationResult:
     """Validate a MaGRIP smoke-test summary or manifest JSON."""
 
     summary_path = Path(path)
@@ -64,6 +67,7 @@ def validate_smoke_summary(path: str | Path, expected_topology: str | None = Non
     masks = summary.get("mask_summaries", {})
     saliency = summary.get("saliency_summaries", {})
     calibration = summary.get("calibration", {})
+    mask_cost = summary.get("mask_cost")
 
     if not targets:
         result.errors.append("Artifact contains no discovered targets.")
@@ -89,6 +93,9 @@ def validate_smoke_summary(path: str | Path, expected_topology: str | None = Non
 
     for key, mask in masks.items():
         _validate_artifact_mask(key, mask, result)
+
+    if mask_cost is not None:
+        _validate_aggregate_mask_cost(mask_cost, masks, result)
 
     for key, saliency_stats in saliency.items():
         _validate_saliency_stats(key, saliency_stats, result)
@@ -126,6 +133,12 @@ def _validate_artifact_mask(key: str, mask: dict[str, Any], result: ValidationRe
     retained = mask.get("retained_ratio")
     shape = values.get("shape", [])
     mask_sum = values.get("sum")
+    full_cost = mask.get("full_cost")
+    retained_cost = mask.get("retained_cost")
+    cost_retained_ratio = mask.get("cost_retained_ratio")
+    full_flop_cost = mask.get("full_flop_cost")
+    retained_flop_cost = mask.get("retained_flop_cost")
+    flop_cost_retained_ratio = mask.get("flop_cost_retained_ratio")
 
     if not total or total <= 0:
         result.errors.append(f"Mask {key} has invalid total channel count.")
@@ -140,6 +153,59 @@ def _validate_artifact_mask(key: str, mask: dict[str, Any], result: ValidationRe
             f"Mask {key} active_channels={active} differs from tensor sum={mask_sum}. "
             "This can happen in old low-precision artifacts and is fixed for future runs."
         )
+    if full_cost is not None and full_cost <= 0.0:
+        result.errors.append(f"Mask {key} has invalid full cost {full_cost}.")
+    if retained_cost is not None and retained_cost < 0.0:
+        result.errors.append(f"Mask {key} has invalid retained cost {retained_cost}.")
+    if cost_retained_ratio is not None and not 0.0 <= cost_retained_ratio <= 1.0:
+        result.errors.append(
+            f"Mask {key} has invalid cost retained ratio {cost_retained_ratio}."
+        )
+    if full_flop_cost is not None and full_flop_cost <= 0.0:
+        result.errors.append(f"Mask {key} has invalid full FLOP cost {full_flop_cost}.")
+    if retained_flop_cost is not None and retained_flop_cost < 0.0:
+        result.errors.append(
+            f"Mask {key} has invalid retained FLOP cost {retained_flop_cost}."
+        )
+    if flop_cost_retained_ratio is not None and not 0.0 <= flop_cost_retained_ratio <= 1.0:
+        result.errors.append(
+            f"Mask {key} has invalid FLOP retained ratio {flop_cost_retained_ratio}."
+        )
+
+
+def _validate_aggregate_mask_cost(
+    mask_cost: dict[str, Any],
+    masks: dict[str, Any],
+    result: ValidationResult,
+) -> None:
+    full_cost = mask_cost.get("full_cost")
+    retained_cost = mask_cost.get("retained_cost")
+    retained_ratio = mask_cost.get("retained_ratio")
+    full_flop_cost = mask_cost.get("full_flop_cost")
+    retained_flop_cost = mask_cost.get("retained_flop_cost")
+    flop_retained_ratio = mask_cost.get("flop_retained_ratio")
+    if full_cost is None or full_cost <= 0.0:
+        result.errors.append("Aggregate mask cost has invalid full_cost.")
+        return
+    if retained_cost is None or retained_cost < 0.0:
+        result.errors.append("Aggregate mask cost has invalid retained_cost.")
+        return
+    if retained_ratio is None or not 0.0 <= retained_ratio <= 1.0:
+        result.errors.append("Aggregate mask cost has invalid retained_ratio.")
+        return
+
+    item_full = sum(mask.get("full_cost", 0.0) for mask in masks.values())
+    item_retained = sum(mask.get("retained_cost", 0.0) for mask in masks.values())
+    if item_full > 0.0 and abs(float(full_cost) - float(item_full)) > 1e-3:
+        result.errors.append("Aggregate full_cost does not match per-mask costs.")
+    if item_retained >= 0.0 and abs(float(retained_cost) - float(item_retained)) > 1e-3:
+        result.errors.append("Aggregate retained_cost does not match per-mask costs.")
+    if full_flop_cost is not None and full_flop_cost <= 0.0:
+        result.errors.append("Aggregate mask cost has invalid full_flop_cost.")
+    if retained_flop_cost is not None and retained_flop_cost < 0.0:
+        result.errors.append("Aggregate mask cost has invalid retained_flop_cost.")
+    if flop_retained_ratio is not None and not 0.0 <= flop_retained_ratio <= 1.0:
+        result.errors.append("Aggregate mask cost has invalid flop_retained_ratio.")
 
 
 def _validate_saliency_stats(
