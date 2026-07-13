@@ -56,6 +56,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mask-update-frequency", type=int, default=1)
     parser.add_argument("--clip-mask-grad-norm", type=float, default=1.0)
     parser.add_argument("--recompute-saliency-every", type=int, default=0)
+    parser.add_argument("--saliency-full-gradients", action="store_true")
+    parser.add_argument("--saliency-branch-diagnostics", action="store_true")
+    parser.add_argument("--no-progress", action="store_true")
     parser.add_argument("--checkpoint-every", type=int, default=0)
     parser.add_argument("--stabilization-steps", type=int, default=0)
     parser.add_argument("--no-final-harden", action="store_true")
@@ -84,6 +87,7 @@ def main() -> None:
     from magrip.discovery import discover_ffn_targets
     from magrip.logging import RunLogger, cuda_memory_snapshot, system_info, tensor_stats
     from magrip.masks import save_mask_state, total_mask_cost
+    from magrip.saliency import SaliencyConfig
     from magrip.trainer import MaGRIPTrainer, config_to_dict, training_result_to_summary
 
     model_slug = args.model_name.replace("/", "__")
@@ -183,7 +187,9 @@ def main() -> None:
         dataset_name=args.dataset_name if args.calibration_source == "dataset" else None,
         dataset_config=args.dataset_config if args.calibration_source == "dataset" else None,
         dataset_split=args.dataset_split if args.calibration_source == "dataset" else None,
-        eval_dataset_split=args.eval_dataset_split if args.calibration_source == "dataset" else None,
+        eval_dataset_split=(
+            args.eval_dataset_split if args.calibration_source == "dataset" else None
+        ),
         text_column=args.text_column if args.calibration_source == "dataset" else None,
         num_batches=len(batches),
         eval_num_batches=len(eval_batches),
@@ -218,6 +224,7 @@ def main() -> None:
         ),
         training=TrainingConfig(
             max_steps=args.max_steps,
+            show_progress=not args.no_progress,
             train_weights=args.train_weights,
             train_masks=True,
             recompute_saliency_every=args.recompute_saliency_every,
@@ -233,7 +240,16 @@ def main() -> None:
         ),
     )
 
-    trainer = MaGRIPTrainer(model=model, config=config, targets=targets)
+    saliency_config = SaliencyConfig(
+        collect_branch_diagnostics=args.saliency_branch_diagnostics,
+        require_parameter_gradients=args.saliency_full_gradients,
+    )
+    trainer = MaGRIPTrainer(
+        model=model,
+        config=config,
+        targets=targets,
+        saliency_config=saliency_config,
+    )
     train_start = time.perf_counter()
     result = trainer.train(
         batches=batches,
@@ -293,6 +309,7 @@ def main() -> None:
             "eval_num_tokens": batches_token_count(eval_batches),
         },
         "config": config_to_dict(config),
+        "saliency_config": saliency_config.__dict__,
         "targets": [target_to_dict(target) for target in result.targets],
         "mask_summaries": mask_summaries(result.masks, tensor_stats),
         "saliency_summaries": saliency_summaries(result.initial_saliency, tensor_stats),
@@ -424,9 +441,18 @@ def write_metric_artifacts(run_dir: Path, summary: dict[str, object]) -> None:
             "task_loss",
             "budget_penalty",
             "retained_cost_ratio",
+            "budget_error",
+            "mask_entropy",
             "target_retained_ratio",
             "hard_retained_cost_ratio",
             "mask_grad_norm",
+            "mask_grad_mean",
+            "mask_grad_min",
+            "mask_grad_max",
+            "mask_grad_nonzero_count",
+            "mask_grad_target_count",
+            "mask_update_mean_abs",
+            "mask_update_max_abs",
         ]
         rows = [",".join(fields)]
         for item in metrics:
@@ -440,9 +466,18 @@ def write_metric_artifacts(run_dir: Path, summary: dict[str, object]) -> None:
                 objective.get("task_loss"),
                 objective.get("budget_penalty"),
                 objective.get("retained_cost_ratio"),
+                objective.get("budget_error"),
+                objective.get("mask_entropy"),
                 objective.get("target_retained_ratio"),
                 item.get("hard_retained_cost_ratio"),
                 item.get("mask_grad_norm"),
+                item.get("mask_grad_mean"),
+                item.get("mask_grad_min"),
+                item.get("mask_grad_max"),
+                item.get("mask_grad_nonzero_count"),
+                item.get("mask_grad_target_count"),
+                item.get("mask_update_mean_abs"),
+                item.get("mask_update_max_abs"),
             ]
             rows.append(",".join("" if value is None else str(value) for value in row))
         (metrics_dir / "metrics.csv").write_text("\n".join(rows) + "\n")

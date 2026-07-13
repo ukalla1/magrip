@@ -15,6 +15,7 @@ dependencies = [
   "tqdm",
   "numpy",
   "accelerate",
+  "matplotlib",
 ]
 
 [project.optional-dependencies]

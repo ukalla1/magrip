@@ -142,7 +142,9 @@ optional AdamW weight updates, keeps APOLLO reserved for M6, and records objecti
 budget, mask-gradient, retained-cost, checkpoint, and saliency-drift signals. M5 result
 inspection passed on GPT-2 dense and Gemma gated smoke runs. The quick runs are
 technically coherent, but longer runs should use stronger budget pressure because relaxed
-mask probabilities can drift below the final hard-mask target before hardening.
+mask probabilities can drift below the final hard-mask target before hardening. Follow-up
+M5 tuning added budget-calibrated saliency-logit initialization so the relaxed objective
+starts near the target retained-cost ratio.
 
 ### M6: APOLLO Integration
 

@@ -173,3 +173,10 @@ python scripts/run_magrip_train.py \
 
 The training summary writes objective traces under `training.metrics`.
 Additional analysis artifacts are written under `outputs/runs/<run>/metrics/`.
+
+Audit and plot a completed M5 run with:
+
+```bash
+python scripts/plot_magrip_run.py outputs/runs/<run>/summary.json \
+  --mask-state models/Pruned/<model>_magrip_train/mask_state.pt
+```

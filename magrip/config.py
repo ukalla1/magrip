@@ -40,6 +40,7 @@ class TrainingConfig:
 
     max_steps: int = 20
     log_every: int = 1
+    show_progress: bool = False
     eval_every: int = 0
     checkpoint_every: int = 0
     train_weights: bool = False

@@ -89,3 +89,6 @@ def test_trainer_runs_mask_only_step() -> None:
     assert len(result.metrics) == 2
     assert result.masks.as_dict()["block.mlp"].active_channels == 3
     assert result.metrics[0].objective["task_loss"] > 0.0
+    assert result.metrics[0].mask_grad_target_count == 1
+    assert result.metrics[0].mask_grad_nonzero_count == 1
+    assert result.metrics[0].mask_update_mean_abs is not None

@@ -149,6 +149,17 @@ class StructuredMask(nn.Module):
         """Create a trainable mask whose logits are initialized from saliency."""
 
         logits = saliency_to_logits(saliency, scale=init_scale)
+        budget_costs = (
+            cost_per_channel.detach().float()
+            if cost_per_channel is not None
+            else torch.ones_like(logits)
+        )
+        logits = shift_logits_to_retained_budget(
+            logits=logits,
+            retained_ratio=retained_ratio,
+            temperature=temperature,
+            cost_per_channel=budget_costs.to(device=logits.device),
+        )
         threshold = threshold_for_retained_ratio(
             torch.sigmoid(logits / temperature),
             retained_ratio,
@@ -395,6 +406,50 @@ def threshold_for_retained_ratio(probabilities: Tensor, retained_ratio: float) -
     keep = max(1, int(round(channels * retained_ratio)))
     cutoff = torch.topk(probabilities.detach().float(), k=keep, largest=True).values[-1]
     return float(cutoff.cpu().item())
+
+
+def shift_logits_to_retained_budget(
+    logits: Tensor,
+    retained_ratio: float,
+    temperature: float = 1.0,
+    cost_per_channel: Tensor | None = None,
+    iterations: int = 64,
+) -> Tensor:
+    """Shift logits so relaxed probabilities match a retained-cost budget.
+
+    The shift preserves saliency ranking while making ``Cost(q) / Cost(1)`` start near
+    the target budget used by the differentiable objective.
+    """
+
+    _validate_retained_ratio(retained_ratio)
+    if temperature <= 0.0:
+        raise ValueError("temperature must be positive.")
+    if logits.ndim != 1:
+        raise ValueError(f"Expected 1D logits, got shape {tuple(logits.shape)}.")
+
+    values = logits.detach().float()
+    costs = (
+        cost_per_channel.detach().float().to(device=values.device)
+        if cost_per_channel is not None
+        else torch.ones_like(values)
+    )
+    if costs.shape != values.shape:
+        raise ValueError(
+            f"Cost shape {tuple(costs.shape)} does not match logits shape {tuple(values.shape)}."
+        )
+
+    target = values.new_tensor(float(retained_ratio))
+    full_cost = costs.sum().clamp_min(1e-12)
+    low = values.new_tensor(-80.0)
+    high = values.new_tensor(80.0)
+    for _ in range(iterations):
+        mid = (low + high) / 2.0
+        ratio = (torch.sigmoid((values + mid) / temperature) * costs).sum() / full_cost
+        if ratio < target:
+            low = mid
+        else:
+            high = mid
+    return values + ((low + high) / 2.0)
 
 
 @contextmanager

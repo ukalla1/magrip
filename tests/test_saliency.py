@@ -4,6 +4,7 @@ import torch
 from torch import nn
 
 from magrip.saliency import (
+    SaliencyConfig,
     SaliencyNormalization,
     SaliencyRefreshSchedule,
     SaliencyTracker,
@@ -84,6 +85,40 @@ def test_collect_saliency_uses_contract_input_channel_shape() -> None:
     assert result.branch_magnitude[target.ffn_path]["block.mlp.fc_in"].shape == (5,)
     combined = result.combined(normalization=SaliencyNormalization.LAYER_MEDIAN)
     assert combined[target.ffn_path].shape == (5,)
+
+
+def test_memory_safe_saliency_matches_full_gradient_contract_signal() -> None:
+    torch.manual_seed(0)
+    model = ToyModel()
+    target = dense_target()
+    input_ids = torch.randn(2, 3, 4)
+
+    full = collect_saliency(
+        model,
+        targets=[target],
+        input_ids=input_ids,
+        config=SaliencyConfig(require_parameter_gradients=True),
+    )
+    memory_safe = collect_saliency(
+        model,
+        targets=[target],
+        input_ids=input_ids,
+        config=SaliencyConfig(
+            collect_branch_diagnostics=False,
+            require_parameter_gradients=False,
+        ),
+    )
+
+    assert torch.allclose(
+        full.magnitude[target.ffn_path],
+        memory_safe.magnitude[target.ffn_path],
+        atol=1e-6,
+    )
+    assert torch.allclose(
+        full.gradient[target.ffn_path],
+        memory_safe.gradient[target.ffn_path],
+        atol=1e-6,
+    )
 
 
 def test_saliency_tracker_reports_drift_on_update() -> None:

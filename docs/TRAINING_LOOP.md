@@ -41,6 +41,16 @@ The M5 trainer performs:
 
 The default is mask-only training, which is the safest way to validate M5 before APOLLO.
 
+## Memory-Safe Saliency
+
+For large models, M5 defaults to computing saliency with gradients only at the FFN
+contraction input. This is not a lower-quality saliency approximation: the M4 primary
+score only needs `dL/du` at that intermediate tensor. Detaching `u` and making it a leaf
+preserves the downstream gradient `dL/du` while avoiding full parameter-gradient storage.
+
+Use `--saliency-full-gradients` only for debugging small models. It should produce the same
+primary contraction-input saliency, but it stores much more gradient state.
+
 ## Server Smoke Command
 
 ```bash
@@ -82,6 +92,9 @@ The output directory contains:
 - `models/Pruned/<model>_magrip_train/masks.pt`;
 - optional full training checkpoints when `--checkpoint-every` is set.
 
+The CLI shows a tqdm progress bar by default with task loss, total loss, soft/hard retained
+budget, mask gradient norm, and temperature. Use `--no-progress` for non-interactive logs.
+
 With Qwen3-8B:
 
 ```bash
@@ -103,6 +116,50 @@ python scripts/run_magrip_train.py \
   --recompute-saliency-every 0 \
   --checkpoint-every 50
 ```
+
+For a stricter M5 convergence test at 60 percent retained FFN channels:
+
+```bash
+python scripts/run_magrip_train.py \
+  --model-name Qwen/Qwen3-8B \
+  --device cuda \
+  --torch-dtype bfloat16 \
+  --max-steps 600 \
+  --retained-ratio 0.6 \
+  --dataset-split train \
+  --eval-dataset-split validation \
+  --num-samples 512 \
+  --eval-num-samples 64 \
+  --max-length 256 \
+  --batch-size 1 \
+  --budget-penalty-weight 25.0 \
+  --mask-learning-rate 2e-3 \
+  --temperature-decay 0.999 \
+  --mask-regularization-weight 0.001 \
+  --checkpoint-every 100
+```
+
+For this run, inspect:
+
+- `training.metrics[*].objective.budget_error`, which should stay near zero after the
+  budget-calibrated initialization;
+- `training.metrics[*].objective.task_loss`, which should not explode;
+- `training.initial_masked_loss` versus `training.final_masked_loss`;
+- final validation `masked_loss` and `masked_perplexity`;
+- `metrics/metrics.csv` for presentation-ready traces.
+
+Create an audit report and diagnostic plots with:
+
+```bash
+python scripts/plot_magrip_run.py \
+  outputs/runs/Qwen__Qwen3-8B_magrip_train_20260710_184006/summary.json \
+  --mask-state models/Pruned/Qwen__Qwen3-8B_magrip_train/mask_state.pt
+```
+
+This writes `loss_curves.png`, `budget_curves.png`, `mask_dynamics.png`, and
+`final_layer_retention.png` under the run's `plots/` directory. Runs produced after the
+per-target gradient telemetry update also report how many target masks received nonzero
+gradients on each step.
 
 ## Tests
 

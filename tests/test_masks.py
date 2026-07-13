@@ -13,6 +13,7 @@ from magrip.masks import (
     masks_from_saliency,
     save_mask_state,
     set_mask_temperature,
+    shift_logits_to_retained_budget,
     total_mask_cost,
     trainable_masks_from_saliency,
 )
@@ -137,6 +138,23 @@ def test_trainable_mask_ste_propagates_to_logits() -> None:
 
     assert mask.logits.grad is not None
     assert mask.logits.grad.shape == mask.logits.shape
+
+
+def test_saliency_logits_are_shifted_to_retained_budget() -> None:
+    target = dense_target()
+    saliency = {target.ffn_path: torch.arange(6, dtype=torch.float32)}
+    collection = trainable_masks_from_saliency(saliency, [target], retained_ratio=0.6)
+    mask = collection.as_dict()[target.ffn_path]
+
+    assert abs(float(mask.probabilities.mean().item()) - 0.6) < 1e-5
+
+
+def test_shift_logits_to_retained_budget_preserves_ranking() -> None:
+    logits = torch.tensor([-2.0, 0.0, 2.0])
+    shifted = shift_logits_to_retained_budget(logits, retained_ratio=0.6)
+
+    assert torch.equal(torch.argsort(logits), torch.argsort(shifted))
+    assert abs(float(torch.sigmoid(shifted).mean().item()) - 0.6) < 1e-5
 
 
 def test_temperature_schedule_updates_collection_masks() -> None:

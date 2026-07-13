@@ -23,6 +23,8 @@ class ObjectiveBreakdown:
     mask_regularization: Tensor
     distillation_loss: Tensor
     retained_cost_ratio: Tensor
+    budget_error: Tensor
+    mask_entropy: Tensor
     target_retained_ratio: float
     budget_penalty_weight: float
 
@@ -36,6 +38,8 @@ class ObjectiveBreakdown:
             "mask_regularization": _to_float(self.mask_regularization),
             "distillation_loss": _to_float(self.distillation_loss),
             "retained_cost_ratio": _to_float(self.retained_cost_ratio),
+            "budget_error": _to_float(self.budget_error),
+            "mask_entropy": _to_float(self.mask_entropy),
             "target_retained_ratio": float(self.target_retained_ratio),
             "budget_penalty_weight": float(self.budget_penalty_weight),
         }
@@ -54,11 +58,13 @@ def compute_magrip_objective(
     target_ratio = retained_ratio_schedule(config, step)
     penalty_weight = budget_penalty_schedule(config, step)
     retained_ratio = differentiable_retained_cost_ratio(masks, like=task_loss)
-    budget_penalty = penalty_weight * (retained_ratio - target_ratio).pow(2)
-    regularization = config.mask_regularization_weight * mask_entropy_regularization(
+    budget_error = retained_ratio - target_ratio
+    budget_penalty = penalty_weight * budget_error.pow(2)
+    entropy = mask_entropy_regularization(
         masks,
         like=task_loss,
     )
+    regularization = config.mask_regularization_weight * entropy
     distillation = config.distillation_weight * distillation_loss(
         student_logits=student_logits,
         teacher_logits=teacher_logits,
@@ -74,6 +80,8 @@ def compute_magrip_objective(
         mask_regularization=regularization,
         distillation_loss=distillation,
         retained_cost_ratio=retained_ratio,
+        budget_error=budget_error,
+        mask_entropy=entropy,
         target_retained_ratio=target_ratio,
         budget_penalty_weight=penalty_weight,
     )

@@ -50,6 +50,13 @@ class TrainingStepMetrics:
     hard_retained_cost_ratio: float
     hard_retained_flop_ratio: float
     mask_grad_norm: float | None = None
+    mask_grad_mean: float | None = None
+    mask_grad_min: float | None = None
+    mask_grad_max: float | None = None
+    mask_grad_nonzero_count: int | None = None
+    mask_grad_target_count: int | None = None
+    mask_update_mean_abs: float | None = None
+    mask_update_max_abs: float | None = None
     weight_grad_norm: float | None = None
     saliency_drift: dict[str, float] | None = None
 
@@ -184,20 +191,21 @@ class MaGRIPTrainer:
         metrics: list[TrainingStepMetrics] = []
         checkpoints: list[str] = []
         step = 0
+        progress = self._make_progress_bar()
         try:
             while step < self.config.training.max_steps:
                 for batch_index, batch in enumerate(batches):
                     if step >= self.config.training.max_steps:
                         break
-                    metrics.append(
-                        self._train_step(
-                            batch=batch,
-                            step=step,
-                            epoch_index=step // len(batches),
-                            batch_index=batch_index,
-                            saliency_tracker=saliency_tracker,
-                        )
+                    metric = self._train_step(
+                        batch=batch,
+                        step=step,
+                        epoch_index=step // len(batches),
+                        batch_index=batch_index,
+                        saliency_tracker=saliency_tracker,
                     )
+                    metrics.append(metric)
+                    self._update_progress_bar(progress, metric)
                     step += 1
                     if checkpoint_path is not None and self._should_checkpoint(step):
                         checkpoints.append(str(self._save_checkpoint(checkpoint_path, step)))
@@ -234,6 +242,8 @@ class MaGRIPTrainer:
             )
         finally:
             self._restore_trainable_parameters()
+            if progress is not None:
+                progress.close()
 
     def harden_masks(self) -> None:
         """Harden masks to the configured final retained budget."""
@@ -275,6 +285,7 @@ class MaGRIPTrainer:
         objective = self._forward_objective(batch=batch, step=step)
         objective.total_loss.backward()
 
+        mask_grad_stats = self._mask_gradient_stats() if mask_update else {}
         mask_grad_norm = self._clip_mask_gradients() if mask_update else None
         weight_grad_norm = self._clip_weight_gradients() if weight_update else None
 
@@ -284,6 +295,11 @@ class MaGRIPTrainer:
             self.mask_optimizer.step()
             if previous_logits is not None:
                 self._clip_mask_update_(previous_logits)
+        mask_update_stats = (
+            self._mask_update_stats(previous_logits)
+            if mask_update and previous_logits is not None
+            else {}
+        )
 
         if self.mask_optimizer is not None:
             self.mask_optimizer.zero_grad(set_to_none=True)
@@ -318,6 +334,13 @@ class MaGRIPTrainer:
             hard_retained_cost_ratio=hard_cost.retained_ratio,
             hard_retained_flop_ratio=hard_cost.flop_retained_ratio,
             mask_grad_norm=mask_grad_norm,
+            mask_grad_mean=mask_grad_stats.get("mean"),
+            mask_grad_min=mask_grad_stats.get("min"),
+            mask_grad_max=mask_grad_stats.get("max"),
+            mask_grad_nonzero_count=mask_grad_stats.get("nonzero_count"),
+            mask_grad_target_count=mask_grad_stats.get("target_count"),
+            mask_update_mean_abs=mask_update_stats.get("mean_abs"),
+            mask_update_max_abs=mask_update_stats.get("max_abs"),
             weight_grad_norm=weight_grad_norm,
             saliency_drift=drift_payload,
         )
@@ -384,6 +407,45 @@ class MaGRIPTrainer:
             return None
         norm = clip_grad_norm_(self.masks.parameters(), self.config.training.clip_mask_grad_norm)
         return float(norm.detach().cpu().item())
+
+    def _mask_gradient_stats(self) -> dict[str, float | int]:
+        if self.masks is None:
+            return {}
+        norms: list[float] = []
+        for mask in self.masks.as_dict().values():
+            if mask.logits.grad is None:
+                norms.append(0.0)
+                continue
+            grad_norm = torch.linalg.vector_norm(mask.logits.grad.detach().float())
+            norms.append(float(grad_norm.cpu().item()))
+        if not norms:
+            return {}
+        nonzero = sum(value > 0.0 for value in norms)
+        return {
+            "mean": float(sum(norms) / len(norms)),
+            "min": float(min(norms)),
+            "max": float(max(norms)),
+            "nonzero_count": int(nonzero),
+            "target_count": int(len(norms)),
+        }
+
+    def _mask_update_stats(self, previous_logits: dict[str, Tensor]) -> dict[str, float]:
+        if self.masks is None:
+            return {}
+        mean_abs_values: list[float] = []
+        max_abs_values: list[float] = []
+        with torch.no_grad():
+            for key, mask in self.masks.as_dict().items():
+                previous = previous_logits[key].to(device=mask.logits.device)
+                delta = (mask.logits.detach() - previous).float().abs()
+                mean_abs_values.append(float(delta.mean().cpu().item()))
+                max_abs_values.append(float(delta.max().cpu().item()))
+        if not mean_abs_values:
+            return {}
+        return {
+            "mean_abs": float(sum(mean_abs_values) / len(mean_abs_values)),
+            "max_abs": float(max(max_abs_values)),
+        }
 
     def _clip_weight_gradients(self) -> float | None:
         if self.config.training.clip_weight_grad_norm is None:
@@ -455,6 +517,42 @@ class MaGRIPTrainer:
         mask_state_name = "final_mask_state.pt" if final else f"mask_state_step_{step}.pt"
         save_mask_state(checkpoint_dir / mask_state_name, self.masks)
         return path
+
+    def _make_progress_bar(self) -> object | None:
+        if not self.config.training.show_progress:
+            return None
+        from tqdm.auto import tqdm
+
+        return tqdm(
+            total=self.config.training.max_steps,
+            desc="MaGRIP training",
+            dynamic_ncols=True,
+            leave=True,
+        )
+
+    def _update_progress_bar(
+        self,
+        progress: object | None,
+        metric: TrainingStepMetrics,
+    ) -> None:
+        if progress is None:
+            return
+        objective = metric.objective
+        progress.set_postfix(
+            {
+                "task": f"{objective['task_loss']:.4f}",
+                "total": f"{objective['total_loss']:.4f}",
+                "soft": f"{objective['retained_cost_ratio']:.3f}",
+                "hard": f"{metric.hard_retained_cost_ratio:.3f}",
+                "grad": (
+                    "nan"
+                    if metric.mask_grad_norm is None
+                    else f"{metric.mask_grad_norm:.3f}"
+                ),
+                "tau": f"{metric.temperature:.3f}",
+            }
+        )
+        progress.update(1)
 
 
 def collect_saliency_over_batches(
@@ -535,6 +633,13 @@ def training_result_to_summary(result: TrainingResult) -> dict[str, Any]:
                 "hard_retained_cost_ratio": item.hard_retained_cost_ratio,
                 "hard_retained_flop_ratio": item.hard_retained_flop_ratio,
                 "mask_grad_norm": item.mask_grad_norm,
+                "mask_grad_mean": item.mask_grad_mean,
+                "mask_grad_min": item.mask_grad_min,
+                "mask_grad_max": item.mask_grad_max,
+                "mask_grad_nonzero_count": item.mask_grad_nonzero_count,
+                "mask_grad_target_count": item.mask_grad_target_count,
+                "mask_update_mean_abs": item.mask_update_mean_abs,
+                "mask_update_max_abs": item.mask_update_max_abs,
                 "weight_grad_norm": item.weight_grad_norm,
                 "saliency_drift": item.saliency_drift,
             }
