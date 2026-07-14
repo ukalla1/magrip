@@ -115,6 +115,14 @@ def _print_audit(
     task_loss = _series(objectives, "task_loss")
     total_loss = _series(objectives, "total_loss")
     grad_norm = _series(metrics, "mask_grad_norm")
+    weight_grad_norm = _series(metrics, "weight_grad_norm")
+    apollo_state_norm = _nested_series(metrics, "apollo_diagnostics", "optimizer_state_tensor_norm")
+    apollo_projected_norm = _nested_series(
+        metrics,
+        "apollo_diagnostics",
+        "projected_state_tensor_norm",
+    )
+    validation_loss = _series(metrics, "validation_loss")
     nonfinite = _count_nonfinite(metrics)
 
     print("audit:")
@@ -149,6 +157,10 @@ def _print_audit(
     print(f"  task_loss: {_range_text(task_loss)}")
     print(f"  total_loss: {_range_text(total_loss)}")
     print(f"  mask_grad_norm: {_range_text(grad_norm)}")
+    print(f"  weight_grad_norm: {_range_text(weight_grad_norm)}")
+    print(f"  apollo_state_norm: {_range_text(apollo_state_norm)}")
+    print(f"  apollo_projected_state_norm: {_range_text(apollo_projected_norm)}")
+    print(f"  validation_loss: {_range_text(validation_loss)}")
     print(f"  nonfinite_metrics: {nonfinite}")
 
     grad_nonzero = _series(metrics, "mask_grad_nonzero_count")
@@ -169,6 +181,16 @@ def _plot_losses(plt: Any, metrics: list[dict[str, Any]], output_dir: Path) -> P
     fig, ax = plt.subplots(figsize=(9, 5))
     ax.plot(steps, _series(objectives, "task_loss"), label="task loss", linewidth=1.5)
     ax.plot(steps, _series(objectives, "total_loss"), label="total loss", linewidth=1.5)
+    validation_steps, validation_loss = _paired_series(metrics, "step", "validation_loss")
+    if validation_loss:
+        ax.plot(
+            validation_steps,
+            validation_loss,
+            label="validation loss",
+            linewidth=1.8,
+            marker="o",
+            markersize=3,
+        )
     budget = _series(objectives, "budget_penalty")
     if budget:
         ax.plot(steps, budget, label="budget penalty", linewidth=1.0)
@@ -293,8 +315,48 @@ def _series(items: list[dict[str, Any]], key: str) -> list[float]:
     return values
 
 
+def _nested_series(items: list[dict[str, Any]], parent_key: str, child_key: str) -> list[float]:
+    values: list[float] = []
+    for item in items:
+        parent = item.get(parent_key)
+        if not isinstance(parent, dict):
+            continue
+        value = parent.get(child_key)
+        if value is None:
+            continue
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(number):
+            values.append(number)
+    return values
+
+
 def _steps(metrics: list[dict[str, Any]]) -> list[int]:
     return [int(item.get("step", index)) for index, item in enumerate(metrics)]
+
+
+def _paired_series(
+    items: list[dict[str, Any]],
+    x_key: str,
+    y_key: str,
+) -> tuple[list[float], list[float]]:
+    xs: list[float] = []
+    ys: list[float] = []
+    for index, item in enumerate(items):
+        y_value = item.get(y_key)
+        if y_value is None:
+            continue
+        try:
+            x = float(item.get(x_key, index))
+            y = float(y_value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(x) and math.isfinite(y):
+            xs.append(x)
+            ys.append(y)
+    return xs, ys
 
 
 def _range_text(values: list[float]) -> str:

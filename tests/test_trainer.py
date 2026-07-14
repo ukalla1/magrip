@@ -92,3 +92,58 @@ def test_trainer_runs_mask_only_step() -> None:
     assert result.metrics[0].mask_grad_target_count == 1
     assert result.metrics[0].mask_grad_nonzero_count == 1
     assert result.metrics[0].mask_update_mean_abs is not None
+
+
+def test_soft_mask_warmup_uses_relaxed_forward_mode() -> None:
+    torch.manual_seed(0)
+    model = ToyCausalLM()
+    config = MaGRIPConfig(
+        objective=ObjectiveConfig(target_retained_ratio=0.5),
+        mask_schedule=MaskScheduleConfig(
+            soft_warmup_steps=2,
+            initial_temperature=1.0,
+        ),
+        training=TrainingConfig(
+            max_steps=1,
+            train_weights=False,
+            train_masks=True,
+            final_harden=False,
+        ),
+        optimizer=OptimizerConfig(mask_learning_rate=1e-2),
+    )
+    trainer = MaGRIPTrainer(model=model, config=config, targets=[dense_target()])
+    batches = [torch.randn(2, 3, 4)]
+
+    result = trainer.train(batches)
+    mask = result.masks.as_dict()["block.mlp"]
+
+    assert mask.hard is False
+    assert mask.ste is False
+
+
+def test_soft_mask_warmup_switches_to_hard_ste_after_warmup() -> None:
+    torch.manual_seed(0)
+    model = ToyCausalLM()
+    config = MaGRIPConfig(
+        objective=ObjectiveConfig(target_retained_ratio=0.5),
+        mask_schedule=MaskScheduleConfig(
+            soft_warmup_steps=1,
+            initial_temperature=1.0,
+            use_ste=True,
+        ),
+        training=TrainingConfig(
+            max_steps=2,
+            train_weights=False,
+            train_masks=True,
+            final_harden=False,
+        ),
+        optimizer=OptimizerConfig(mask_learning_rate=1e-2),
+    )
+    trainer = MaGRIPTrainer(model=model, config=config, targets=[dense_target()])
+    batches = [torch.randn(2, 3, 4)]
+
+    result = trainer.train(batches)
+    mask = result.masks.as_dict()["block.mlp"]
+
+    assert mask.hard is True
+    assert mask.ste is True

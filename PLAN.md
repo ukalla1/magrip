@@ -148,13 +148,24 @@ starts near the target retained-cost ratio.
 
 ### M6: APOLLO Integration
 
-- [ ] Add APOLLO as an optional optimizer backend for model weights.
-- [ ] Keep mask optimizer separate from APOLLO.
-- [ ] Build APOLLO parameter groups for full-model adaptation.
-- [ ] Add configuration for APOLLO rank, scale, projection update gap, and mini mode.
-- [ ] Add fallback to AdamW for small CPU/GPU tests.
-- [ ] Document memory tradeoffs in `docs/APOLLO_INTEGRATION.md`.
-- [ ] Inspect APOLLO integration results for technical correctness against the AdamW fallback.
+Goal: move from M5 mask-only refinement to the joint optimization described in
+`docs/THEORY.tex`: APOLLO updates model weights `theta`, a separate lightweight optimizer
+updates mask logits `phi`, and the loss keeps `beta=0` so distillation/KL preservation
+remains out of scope for this milestone.
+
+- [x] Integrate APOLLO/APOLLO-Mini as the M6 model-weight optimizer for `theta`.
+- [x] Keep mask logits `phi` on their own optimizer, schedule, clipping, and update frequency.
+- [x] Build APOLLO parameter groups for the chosen adaptation scope.
+- [x] Add configuration for APOLLO rank, scale, projection update gap, mini mode, learning rate, and weight decay.
+- [x] Preserve M5 saliency-based, budget-calibrated mask initialization as the default start state.
+- [x] Add a soft-mask warmup stage where masks use relaxed probabilities before switching to hard STE.
+- [x] Add configuration for warmup steps, hard-STE switch step, temperature schedule, and two-time-scale mask update frequency.
+- [x] Ensure the M6 objective updates both `theta` and `phi` with task loss, budget loss, and entropy/mask regularization while keeping `beta=0`.
+- [x] Track channel-trading diagnostics: per-target mask gradient coverage, mask update magnitude, active/inactive flips, and final top-k membership changes from initialization.
+- [x] Track APOLLO diagnostics: adapted parameter count, projected-gradient/update norms when exposed by APOLLO, optimizer memory estimate, and weight-update norms.
+- [x] Add periodic validation during training so convergence is measured on a fixed held-out set, not raw train-batch loss.
+- [x] Document APOLLO integration, memory tradeoffs, and the M6 training protocol in `docs/APOLLO_INTEGRATION.md`.
+- [ ] Inspect APOLLO integration results for technical correctness on smoke and target-scale runs.
 
 ### M7: Structural Compaction
 
@@ -182,9 +193,10 @@ starts near the target retained-cost ratio.
 4. Port v1 saliency into topology-aware collectors.
 5. Build the default objective and joint training loop without APOLLO.
 6. Validate on tiny models and synthetic FFNs.
-7. Add APOLLO as the model-weight optimizer backend.
-8. Implement compaction and equivalence checks.
-9. Run progressively larger experiments.
+7. Add APOLLO as the model-weight optimizer backend and train weights jointly with soft masks.
+8. Add soft-mask warmup and channel-trading diagnostics.
+9. Implement compaction and equivalence checks.
+10. Run progressively larger experiments.
 
 ## Design Decisions To Keep Revisited
 
@@ -192,7 +204,8 @@ starts near the target retained-cost ratio.
 - Whether mask saliency should be based on intermediate activations, mask gradients, or both.
 - How often to update masks relative to weights.
 - Whether APOLLO should adapt all weights or only FFN-heavy parameter groups.
-- Whether distillation is worth the hardware cost for each experiment.
+- How long soft-mask warmup should last before switching to hard STE.
+- Whether distillation is worth revisiting after the non-distilled APOLLO path is stable.
 - How to handle MoE architectures after the dense/gated path is stable.
 
 ## Definition of Done for v2 Alpha

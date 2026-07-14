@@ -28,6 +28,7 @@ class MaskScheduleConfig:
     initial_temperature: float = 1.0
     min_temperature: float = 0.05
     temperature_decay: float = 0.99
+    soft_warmup_steps: int = 0
     mask_update_frequency: int = 1
     max_mask_update: float | None = None
     init_scale: float = 2.0
@@ -36,7 +37,7 @@ class MaskScheduleConfig:
 
 @dataclass
 class TrainingConfig:
-    """Controls for the M5 joint optimization loop."""
+    """Controls for MaGRIP optimization loops."""
 
     max_steps: int = 20
     log_every: int = 1
@@ -64,6 +65,14 @@ class OptimizerConfig:
     weight_decay: float = 0.0
     mask_weight_decay: float = 0.0
     use_apollo: bool = False
+    apollo_variant: str = "apollo"
+    apollo_rank: int = 256
+    apollo_scale: float = 1.0
+    apollo_update_proj_gap: int = 200
+    apollo_proj: str = "random"
+    apollo_proj_type: str = "std"
+    apollo_scale_type: str = "channel"
+    apollo_parameter_scope: str = "all"
 
 
 @dataclass

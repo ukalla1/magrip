@@ -1,4 +1,4 @@
-"""Run M5 MaGRIP mask/weight training."""
+"""Run MaGRIP mask/weight training."""
 
 from __future__ import annotations
 
@@ -44,6 +44,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-cache-baseline", action="store_true")
     parser.add_argument("--save-baseline", action="store_true")
     parser.add_argument("--train-weights", action="store_true")
+    parser.add_argument("--use-apollo", action="store_true")
+    parser.add_argument("--apollo-variant", choices=("apollo", "apollo-mini"), default="apollo")
+    parser.add_argument("--apollo-rank", type=int, default=256)
+    parser.add_argument("--apollo-scale", type=float, default=1.0)
+    parser.add_argument("--apollo-update-proj-gap", type=int, default=200)
+    parser.add_argument("--apollo-proj", default="random")
+    parser.add_argument("--apollo-proj-type", default="std")
+    parser.add_argument("--apollo-scale-type", choices=("channel", "tensor"), default="channel")
+    parser.add_argument("--apollo-parameter-scope", choices=("all", "ffn"), default="all")
     parser.add_argument("--mask-learning-rate", type=float, default=1e-3)
     parser.add_argument("--weight-learning-rate", type=float, default=1e-5)
     parser.add_argument("--budget-penalty-weight", type=float, default=1.0)
@@ -53,12 +62,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--initial-temperature", type=float, default=1.0)
     parser.add_argument("--min-temperature", type=float, default=0.05)
     parser.add_argument("--temperature-decay", type=float, default=0.99)
+    parser.add_argument("--soft-warmup-steps", type=int, default=0)
     parser.add_argument("--mask-update-frequency", type=int, default=1)
     parser.add_argument("--clip-mask-grad-norm", type=float, default=1.0)
     parser.add_argument("--recompute-saliency-every", type=int, default=0)
     parser.add_argument("--saliency-full-gradients", action="store_true")
     parser.add_argument("--saliency-branch-diagnostics", action="store_true")
     parser.add_argument("--no-progress", action="store_true")
+    parser.add_argument("--eval-every", type=int, default=0)
     parser.add_argument("--checkpoint-every", type=int, default=0)
     parser.add_argument("--stabilization-steps", type=int, default=0)
     parser.add_argument("--no-final-harden", action="store_true")
@@ -96,6 +107,7 @@ def main() -> None:
     logger = RunLogger(run_dir)
     device = torch.device(args.device)
     wall_start = time.perf_counter()
+    train_weights = args.train_weights or args.use_apollo
 
     logger.log(
         "run_started",
@@ -220,14 +232,16 @@ def main() -> None:
             initial_temperature=args.initial_temperature,
             min_temperature=args.min_temperature,
             temperature_decay=args.temperature_decay,
+            soft_warmup_steps=args.soft_warmup_steps,
             mask_update_frequency=args.mask_update_frequency,
         ),
         training=TrainingConfig(
             max_steps=args.max_steps,
             show_progress=not args.no_progress,
-            train_weights=args.train_weights,
+            train_weights=train_weights,
             train_masks=True,
             recompute_saliency_every=args.recompute_saliency_every,
+            eval_every=args.eval_every,
             checkpoint_every=args.checkpoint_every,
             stabilization_steps=args.stabilization_steps,
             final_harden=not args.no_final_harden,
@@ -237,6 +251,16 @@ def main() -> None:
         optimizer=OptimizerConfig(
             mask_learning_rate=args.mask_learning_rate,
             weight_learning_rate=args.weight_learning_rate,
+            weight_optimizer="apollo" if args.use_apollo else "adamw",
+            use_apollo=args.use_apollo,
+            apollo_variant=args.apollo_variant,
+            apollo_rank=args.apollo_rank,
+            apollo_scale=args.apollo_scale,
+            apollo_update_proj_gap=args.apollo_update_proj_gap,
+            apollo_proj=args.apollo_proj,
+            apollo_proj_type=args.apollo_proj_type,
+            apollo_scale_type=args.apollo_scale_type,
+            apollo_parameter_scope=args.apollo_parameter_scope,
         ),
     )
 
@@ -453,10 +477,21 @@ def write_metric_artifacts(run_dir: Path, summary: dict[str, object]) -> None:
             "mask_grad_target_count",
             "mask_update_mean_abs",
             "mask_update_max_abs",
+            "weight_grad_norm",
+            "apollo_optimizer_state_tensor_norm",
+            "apollo_projected_state_tensor_norm",
+            "apollo_update_state_tensor_norm",
+            "apollo_optimizer_state_tensor_elements",
+            "active_to_inactive_count",
+            "inactive_to_active_count",
+            "mask_flip_count",
+            "validation_loss",
+            "validation_perplexity",
         ]
         rows = [",".join(fields)]
         for item in metrics:
             objective = item.get("objective", {})
+            apollo_diagnostics = item.get("apollo_diagnostics") or {}
             row = [
                 item.get("step"),
                 item.get("temperature"),
@@ -478,6 +513,16 @@ def write_metric_artifacts(run_dir: Path, summary: dict[str, object]) -> None:
                 item.get("mask_grad_target_count"),
                 item.get("mask_update_mean_abs"),
                 item.get("mask_update_max_abs"),
+                item.get("weight_grad_norm"),
+                apollo_diagnostics.get("optimizer_state_tensor_norm"),
+                apollo_diagnostics.get("projected_state_tensor_norm"),
+                apollo_diagnostics.get("update_state_tensor_norm"),
+                apollo_diagnostics.get("optimizer_state_tensor_elements"),
+                item.get("active_to_inactive_count"),
+                item.get("inactive_to_active_count"),
+                item.get("mask_flip_count"),
+                item.get("validation_loss"),
+                item.get("validation_perplexity"),
             ]
             rows.append(",".join("" if value is None else str(value) for value in row))
         (metrics_dir / "metrics.csv").write_text("\n".join(rows) + "\n")

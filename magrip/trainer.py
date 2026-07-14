@@ -25,7 +25,12 @@ from magrip.masks import (
     trainable_masks_from_saliency,
 )
 from magrip.objectives import ObjectiveBreakdown, compute_magrip_objective
-from magrip.optim import build_mask_optimizer, build_weight_optimizer
+from magrip.optim import (
+    apollo_parameter_stats,
+    build_mask_optimizer,
+    build_weight_optimizer,
+    optimizer_state_diagnostics,
+)
 from magrip.saliency import (
     SaliencyConfig,
     SaliencyRefreshSchedule,
@@ -58,6 +63,12 @@ class TrainingStepMetrics:
     mask_update_mean_abs: float | None = None
     mask_update_max_abs: float | None = None
     weight_grad_norm: float | None = None
+    apollo_diagnostics: dict[str, float | int] | None = None
+    active_to_inactive_count: int | None = None
+    inactive_to_active_count: int | None = None
+    mask_flip_count: int | None = None
+    validation_loss: float | None = None
+    validation_perplexity: float | None = None
     saliency_drift: dict[str, float] | None = None
 
 
@@ -75,6 +86,9 @@ class TrainingResult:
     num_steps: int
     num_tokens: int
     checkpoints: list[str] = field(default_factory=list)
+    weight_trainable_parameter_count: int = 0
+    apollo_parameter_stats: dict[str, float | int] | None = None
+    initial_to_final_mask_flips: dict[str, int] | None = None
 
     @property
     def baseline_perplexity(self) -> float:
@@ -92,9 +106,8 @@ class TrainingResult:
 class MaGRIPTrainer:
     """Joint soft-mask adaptation trainer.
 
-    M5 defaults to mask-only adaptation. Weight adaptation can be enabled with
-    ``config.training.train_weights`` and currently uses the configured standard optimizer.
-    APOLLO remains an M6 backend swap.
+    M5 defaults to mask-only adaptation. M6 enables joint weight and mask adaptation by
+    setting ``config.training.train_weights`` and selecting APOLLO in the optimizer config.
     """
 
     def __init__(
@@ -118,6 +131,7 @@ class MaGRIPTrainer:
         self.mask_optimizer: Optimizer | None = None
         self.weight_optimizer: Optimizer | None = None
         self._original_requires_grad: list[bool] | None = None
+        self._initial_binary_masks: dict[str, Tensor] | None = None
 
     def initialize_masks(self, batches: Sequence[Tensor]) -> MaskCollection:
         """Run Stage 0 saliency warm start and create trainable masks."""
@@ -138,6 +152,7 @@ class MaGRIPTrainer:
             init_scale=self.config.mask_schedule.init_scale,
             ste=self.config.mask_schedule.use_ste,
         )
+        self._initial_binary_masks = self._capture_binary_masks()
         return self.masks
 
     def train(
@@ -146,7 +161,7 @@ class MaGRIPTrainer:
         eval_batches: Sequence[Tensor] | None = None,
         checkpoint_dir: str | Path | None = None,
     ) -> TrainingResult:
-        """Run M5 mask/weight adaptation."""
+        """Run MaGRIP mask/weight adaptation."""
 
         if not batches:
             raise ValueError("batches must not be empty.")
@@ -174,8 +189,9 @@ class MaGRIPTrainer:
             if self.config.training.train_masks
             else None
         )
+        weight_stats = self._weight_trainable_stats()
         self.weight_optimizer = (
-            build_weight_optimizer(self.model.parameters(), self.config.optimizer)
+            build_weight_optimizer(self.model, self.config.optimizer)
             if self.config.training.train_weights
             else None
         )
@@ -204,9 +220,19 @@ class MaGRIPTrainer:
                         batch_index=batch_index,
                         saliency_tracker=saliency_tracker,
                     )
+                    next_step = step + 1
+                    if self._should_evaluate(next_step):
+                        metric.validation_loss = mean_causal_lm_loss(
+                            self.model,
+                            eval_batches,
+                            masks=self.masks,
+                        )
+                        metric.validation_perplexity = perplexity_from_loss(
+                            metric.validation_loss,
+                        )
                     metrics.append(metric)
                     self._update_progress_bar(progress, metric)
-                    step += 1
+                    step = next_step
                     if checkpoint_path is not None and self._should_checkpoint(step):
                         checkpoints.append(str(self._save_checkpoint(checkpoint_path, step)))
 
@@ -239,6 +265,9 @@ class MaGRIPTrainer:
                 num_steps=step,
                 num_tokens=int(sum(batch.numel() for batch in batches)),
                 checkpoints=checkpoints,
+                weight_trainable_parameter_count=weight_stats["trainable_parameter_count"],
+                apollo_parameter_stats=weight_stats["apollo_parameter_stats"],
+                initial_to_final_mask_flips=self._initial_to_current_mask_flips(),
             )
         finally:
             self._restore_trainable_parameters()
@@ -271,10 +300,12 @@ class MaGRIPTrainer:
             decay=self.config.mask_schedule.temperature_decay,
         )
         set_mask_temperature(self.masks, temperature)
+        self._set_mask_forward_mode(step)
 
         mask_update = self._should_update_mask(step)
         weight_update = self.config.training.train_weights
         previous_logits = self._capture_mask_logits() if mask_update else None
+        previous_binary = self._capture_binary_masks() if mask_update else None
 
         self.model.train(weight_update)
         if self.mask_optimizer is not None:
@@ -291,6 +322,11 @@ class MaGRIPTrainer:
 
         if self.weight_optimizer is not None and weight_update:
             self.weight_optimizer.step()
+        apollo_diagnostics = (
+            optimizer_state_diagnostics(self.weight_optimizer)
+            if weight_update and self.config.optimizer.use_apollo
+            else None
+        )
         if self.mask_optimizer is not None and mask_update:
             self.mask_optimizer.step()
             if previous_logits is not None:
@@ -298,6 +334,11 @@ class MaGRIPTrainer:
         mask_update_stats = (
             self._mask_update_stats(previous_logits)
             if mask_update and previous_logits is not None
+            else {}
+        )
+        mask_flip_stats = (
+            self._mask_flip_stats(previous_binary)
+            if mask_update and previous_binary is not None
             else {}
         )
 
@@ -342,6 +383,10 @@ class MaGRIPTrainer:
             mask_update_mean_abs=mask_update_stats.get("mean_abs"),
             mask_update_max_abs=mask_update_stats.get("max_abs"),
             weight_grad_norm=weight_grad_norm,
+            apollo_diagnostics=apollo_diagnostics,
+            active_to_inactive_count=mask_flip_stats.get("active_to_inactive"),
+            inactive_to_active_count=mask_flip_stats.get("inactive_to_active"),
+            mask_flip_count=mask_flip_stats.get("total"),
             saliency_drift=drift_payload,
         )
 
@@ -364,8 +409,22 @@ class MaGRIPTrainer:
             parameter.requires_grad
             for parameter in self.model.parameters()
         ]
-        for parameter in self.model.parameters():
-            parameter.requires_grad_(self.config.training.train_weights)
+        if not self.config.training.train_weights:
+            for parameter in self.model.parameters():
+                parameter.requires_grad_(False)
+            return
+
+        scope = self.config.optimizer.apollo_parameter_scope.lower()
+        if scope == "all":
+            for parameter in self.model.parameters():
+                parameter.requires_grad_(True)
+            return
+        if scope != "ffn":
+            raise ValueError(f"Unsupported adaptation parameter scope: {scope!r}.")
+
+        ffn_prefixes = self._ffn_parameter_prefixes()
+        for name, parameter in self.model.named_parameters():
+            parameter.requires_grad_(_matches_any_prefix(name, ffn_prefixes))
 
     def _restore_trainable_parameters(self) -> None:
         if self._original_requires_grad is None:
@@ -380,6 +439,19 @@ class MaGRIPTrainer:
         frequency = max(1, self.config.mask_schedule.mask_update_frequency)
         return step % frequency == 0
 
+    def _should_evaluate(self, step: int) -> bool:
+        every = self.config.training.eval_every
+        return every > 0 and step > 0 and step % every == 0
+
+    def _set_mask_forward_mode(self, step: int) -> None:
+        if self.masks is None:
+            return
+        soft_warmup_steps = max(0, self.config.mask_schedule.soft_warmup_steps)
+        use_soft_masks = step < soft_warmup_steps
+        for mask in self.masks.as_dict().values():
+            mask.hard = not use_soft_masks
+            mask.ste = False if use_soft_masks else self.config.mask_schedule.use_ste
+
     def _should_checkpoint(self, step: int) -> bool:
         every = self.config.training.checkpoint_every
         return every > 0 and step > 0 and step % every == 0
@@ -389,6 +461,14 @@ class MaGRIPTrainer:
             raise RuntimeError("Masks were not initialized.")
         return {
             key: mask.logits.detach().clone()
+            for key, mask in self.masks.as_dict().items()
+        }
+
+    def _capture_binary_masks(self) -> dict[str, Tensor]:
+        if self.masks is None:
+            raise RuntimeError("Masks were not initialized.")
+        return {
+            key: mask.binary_values.detach().clone().bool()
             for key, mask in self.masks.as_dict().items()
         }
 
@@ -447,14 +527,82 @@ class MaGRIPTrainer:
             "max_abs": float(max(max_abs_values)),
         }
 
+    def _mask_flip_stats(self, previous_binary: dict[str, Tensor]) -> dict[str, int]:
+        if self.masks is None:
+            return {}
+        active_to_inactive = 0
+        inactive_to_active = 0
+        for key, mask in self.masks.as_dict().items():
+            previous = previous_binary[key].to(device=mask.logits.device)
+            current = mask.binary_values.detach().bool()
+            active_to_inactive += int((previous & ~current).sum().cpu().item())
+            inactive_to_active += int((~previous & current).sum().cpu().item())
+        return {
+            "active_to_inactive": active_to_inactive,
+            "inactive_to_active": inactive_to_active,
+            "total": active_to_inactive + inactive_to_active,
+        }
+
     def _clip_weight_gradients(self) -> float | None:
-        if self.config.training.clip_weight_grad_norm is None:
-            return None
         parameters = [parameter for parameter in self.model.parameters() if parameter.requires_grad]
         if not parameters:
             return None
+        if self.config.training.clip_weight_grad_norm is None:
+            return _parameter_gradient_norm(parameters)
         norm = clip_grad_norm_(parameters, self.config.training.clip_weight_grad_norm)
         return float(norm.detach().cpu().item())
+
+    def _weight_trainable_stats(self) -> dict[str, int | dict[str, float | int] | None]:
+        trainable_count = int(
+            sum(parameter.numel() for parameter in self.model.parameters() if parameter.requires_grad)
+        )
+        apollo_stats = apollo_parameter_stats(self.model, self.config.optimizer)
+        return {
+            "trainable_parameter_count": trainable_count,
+            "apollo_parameter_stats": (
+                None
+                if apollo_stats is None
+                else {
+                    "total_parameters": apollo_stats.total_parameters,
+                    "adapted_parameters": apollo_stats.adapted_parameters,
+                    "lowrank_parameters": apollo_stats.lowrank_parameters,
+                    "regular_parameters": apollo_stats.regular_parameters,
+                    "lowrank_tensors": apollo_stats.lowrank_tensors,
+                    "regular_tensors": apollo_stats.regular_tensors,
+                    "lowrank_auxiliary_elements": apollo_stats.lowrank_auxiliary_elements,
+                    "lowrank_projection_elements": apollo_stats.lowrank_projection_elements,
+                    "regular_optimizer_state_elements": (
+                        apollo_stats.regular_optimizer_state_elements
+                    ),
+                    "estimated_optimizer_state_elements": (
+                        apollo_stats.estimated_optimizer_state_elements
+                    ),
+                    "estimated_optimizer_state_bytes_fp32": (
+                        apollo_stats.estimated_optimizer_state_bytes_fp32
+                    ),
+                    "estimated_optimizer_state_mib_fp32": (
+                        apollo_stats.estimated_optimizer_state_bytes_fp32 / (1024**2)
+                    ),
+                    "adamw_optimizer_state_elements": apollo_stats.adamw_optimizer_state_elements,
+                    "estimated_state_ratio_vs_adamw": (
+                        apollo_stats.estimated_state_ratio_vs_adamw
+                    ),
+                }
+            ),
+        }
+
+    def _ffn_parameter_prefixes(self) -> tuple[str, ...]:
+        prefixes: set[str] = set()
+        for target in self.targets:
+            prefixes.add(target.ffn_path)
+            prefixes.update(target.expand_module_paths)
+            prefixes.update(target.contract_module_paths)
+        return tuple(sorted(prefixes))
+
+    def _initial_to_current_mask_flips(self) -> dict[str, int] | None:
+        if self._initial_binary_masks is None or self.masks is None:
+            return None
+        return self._mask_flip_stats(self._initial_binary_masks)
 
     def _run_final_recovery(self, batches: Sequence[Tensor]) -> None:
         if not self.config.training.train_weights:
@@ -538,20 +686,21 @@ class MaGRIPTrainer:
         if progress is None:
             return
         objective = metric.objective
-        progress.set_postfix(
-            {
-                "task": f"{objective['task_loss']:.4f}",
-                "total": f"{objective['total_loss']:.4f}",
-                "soft": f"{objective['retained_cost_ratio']:.3f}",
-                "hard": f"{metric.hard_retained_cost_ratio:.3f}",
-                "grad": (
-                    "nan"
-                    if metric.mask_grad_norm is None
-                    else f"{metric.mask_grad_norm:.3f}"
-                ),
-                "tau": f"{metric.temperature:.3f}",
-            }
-        )
+        postfix = {
+            "task": f"{objective['task_loss']:.4f}",
+            "total": f"{objective['total_loss']:.4f}",
+            "soft": f"{objective['retained_cost_ratio']:.3f}",
+            "hard": f"{metric.hard_retained_cost_ratio:.3f}",
+            "grad": (
+                "nan"
+                if metric.mask_grad_norm is None
+                else f"{metric.mask_grad_norm:.3f}"
+            ),
+            "tau": f"{metric.temperature:.3f}",
+        }
+        if metric.validation_loss is not None:
+            postfix["val"] = f"{metric.validation_loss:.4f}"
+        progress.set_postfix(postfix)
         progress.update(1)
 
 
@@ -641,12 +790,37 @@ def training_result_to_summary(result: TrainingResult) -> dict[str, Any]:
                 "mask_update_mean_abs": item.mask_update_mean_abs,
                 "mask_update_max_abs": item.mask_update_max_abs,
                 "weight_grad_norm": item.weight_grad_norm,
+                "apollo_diagnostics": item.apollo_diagnostics,
+                "active_to_inactive_count": item.active_to_inactive_count,
+                "inactive_to_active_count": item.inactive_to_active_count,
+                "mask_flip_count": item.mask_flip_count,
+                "validation_loss": item.validation_loss,
+                "validation_perplexity": item.validation_perplexity,
                 "saliency_drift": item.saliency_drift,
             }
             for item in result.metrics
         ],
         "checkpoints": result.checkpoints,
+        "weight_trainable_parameter_count": result.weight_trainable_parameter_count,
+        "apollo_parameter_stats": result.apollo_parameter_stats,
+        "initial_to_final_mask_flips": result.initial_to_final_mask_flips,
     }
+
+
+def _matches_any_prefix(name: str, prefixes: tuple[str, ...]) -> bool:
+    return any(name == prefix or name.startswith(prefix + ".") for prefix in prefixes)
+
+
+def _parameter_gradient_norm(parameters: Sequence[nn.Parameter]) -> float | None:
+    norms = [
+        torch.linalg.vector_norm(parameter.grad.detach().float())
+        for parameter in parameters
+        if parameter.grad is not None
+    ]
+    if not norms:
+        return None
+    total = torch.linalg.vector_norm(torch.stack(norms))
+    return float(total.cpu().item())
 
 
 def config_to_dict(config: MaGRIPConfig) -> dict[str, Any]:

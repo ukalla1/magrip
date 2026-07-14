@@ -180,3 +180,20 @@ Audit and plot a completed M5 run with:
 python scripts/plot_magrip_run.py outputs/runs/<run>/summary.json \
   --mask-state models/Pruned/<model>_magrip_train/mask_state.pt
 ```
+
+## M6 APOLLO Training
+
+M6 enables joint APOLLO weight adaptation and mask-logit training:
+
+```bash
+python scripts/run_magrip_train.py \
+  --model-name Qwen/Qwen3-8B \
+  --device cuda \
+  --torch-dtype bfloat16 \
+  --use-apollo \
+  --apollo-variant apollo-mini \
+  --soft-warmup-steps 100 \
+  --retained-ratio 0.6
+```
+
+See `docs/APOLLO_INTEGRATION.md` for the full server command and expected diagnostics.
