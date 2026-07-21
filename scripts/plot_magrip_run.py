@@ -176,11 +176,13 @@ def _print_audit(
 
 
 def _plot_losses(plt: Any, metrics: list[dict[str, Any]], output_dir: Path) -> Path:
-    steps = _steps(metrics)
-    objectives = [item.get("objective", {}) for item in metrics]
     fig, ax = plt.subplots(figsize=(9, 5))
-    ax.plot(steps, _series(objectives, "task_loss"), label="task loss", linewidth=1.5)
-    ax.plot(steps, _series(objectives, "total_loss"), label="total loss", linewidth=1.5)
+    task_steps, task_loss = _nested_paired_series(metrics, "objective", "task_loss")
+    total_steps, total_loss = _nested_paired_series(metrics, "objective", "total_loss")
+    if task_loss:
+        ax.plot(task_steps, task_loss, label="task loss", linewidth=1.5)
+    if total_loss:
+        ax.plot(total_steps, total_loss, label="total loss", linewidth=1.5)
     validation_steps, validation_loss = _paired_series(metrics, "step", "validation_loss")
     if validation_loss:
         ax.plot(
@@ -191,9 +193,9 @@ def _plot_losses(plt: Any, metrics: list[dict[str, Any]], output_dir: Path) -> P
             marker="o",
             markersize=3,
         )
-    budget = _series(objectives, "budget_penalty")
+    budget_steps, budget = _nested_paired_series(metrics, "objective", "budget_penalty")
     if budget:
-        ax.plot(steps, budget, label="budget penalty", linewidth=1.0)
+        ax.plot(budget_steps, budget, label="budget penalty", linewidth=1.0)
     ax.set_title("Training Objective")
     ax.set_xlabel("step")
     ax.set_ylabel("loss")
@@ -208,12 +210,15 @@ def _plot_budget(
     metrics: list[dict[str, Any]],
     output_dir: Path,
 ) -> Path:
-    steps = _steps(metrics)
     objectives = [item.get("objective", {}) for item in metrics]
     target = _first_finite(_series(objectives, "target_retained_ratio"))
     fig, ax = plt.subplots(figsize=(9, 5))
-    ax.plot(steps, _series(objectives, "retained_cost_ratio"), label="soft retained", linewidth=1.5)
-    ax.plot(steps, _series(metrics, "hard_retained_cost_ratio"), label="hard retained", linewidth=1.5)
+    soft_steps, soft_retained = _nested_paired_series(metrics, "objective", "retained_cost_ratio")
+    hard_steps, hard_retained = _paired_series(metrics, "step", "hard_retained_cost_ratio")
+    if soft_retained:
+        ax.plot(soft_steps, soft_retained, label="soft retained", linewidth=1.5)
+    if hard_retained:
+        ax.plot(hard_steps, hard_retained, label="hard retained", linewidth=1.5)
     if target is not None:
         ax.axhline(target, color="black", linestyle="--", linewidth=1.0, label="target")
     final_ratio = training.get("mask_cost", {}).get("retained_ratio")
@@ -228,14 +233,18 @@ def _plot_budget(
 
 
 def _plot_mask_dynamics(plt: Any, metrics: list[dict[str, Any]], output_dir: Path) -> Path:
-    steps = _steps(metrics)
-    objectives = [item.get("objective", {}) for item in metrics]
     fig, axes = plt.subplots(3, 1, figsize=(9, 8), sharex=True)
-    axes[0].plot(steps, _series(metrics, "temperature"), color="tab:orange")
+    temperature_steps, temperature = _paired_series(metrics, "step", "temperature")
+    if temperature:
+        axes[0].plot(temperature_steps, temperature, color="tab:orange")
     axes[0].set_ylabel("temperature")
-    axes[1].plot(steps, _series(objectives, "mask_entropy"), color="tab:purple")
+    entropy_steps, entropy = _nested_paired_series(metrics, "objective", "mask_entropy")
+    if entropy:
+        axes[1].plot(entropy_steps, entropy, color="tab:purple")
     axes[1].set_ylabel("entropy")
-    axes[2].plot(steps, _series(metrics, "mask_grad_norm"), color="tab:red")
+    grad_steps, grad_norm = _paired_series(metrics, "step", "mask_grad_norm")
+    if grad_norm:
+        axes[2].plot(grad_steps, grad_norm, color="tab:red")
     axes[2].set_ylabel("grad norm")
     axes[2].set_xlabel("step")
     for ax in axes:
@@ -333,10 +342,6 @@ def _nested_series(items: list[dict[str, Any]], parent_key: str, child_key: str)
     return values
 
 
-def _steps(metrics: list[dict[str, Any]]) -> list[int]:
-    return [int(item.get("step", index)) for index, item in enumerate(metrics)]
-
-
 def _paired_series(
     items: list[dict[str, Any]],
     x_key: str,
@@ -350,6 +355,31 @@ def _paired_series(
             continue
         try:
             x = float(item.get(x_key, index))
+            y = float(y_value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(x) and math.isfinite(y):
+            xs.append(x)
+            ys.append(y)
+    return xs, ys
+
+
+def _nested_paired_series(
+    items: list[dict[str, Any]],
+    parent_key: str,
+    child_key: str,
+) -> tuple[list[float], list[float]]:
+    xs: list[float] = []
+    ys: list[float] = []
+    for index, item in enumerate(items):
+        parent = item.get(parent_key)
+        if not isinstance(parent, dict):
+            continue
+        y_value = parent.get(child_key)
+        if y_value is None:
+            continue
+        try:
+            x = float(item.get("step", index))
             y = float(y_value)
         except (TypeError, ValueError):
             continue

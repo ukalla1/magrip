@@ -1,0 +1,25 @@
+{
+  "name": "m6_train_gpt2_wikitext2_r070_smoke_v1",
+  "script": "scripts/run_magrip_train.py",
+  "description": "Fast dense GPT-2 APOLLO smoke run for plumbing checks.",
+  "args": {
+    "model-name": "gpt2",
+    "device": "cuda",
+    "torch-dtype": "bfloat16",
+    "use-apollo": true,
+    "apollo-variant": "apollo-mini",
+    "retained-ratio": 0.7,
+    "max-steps": 20,
+    "num-samples": 16,
+    "eval-num-samples": 8,
+    "max-length": 128,
+    "batch-size": 1,
+    "soft-warmup-steps": 4,
+    "eval-every": 5,
+    "checkpoint-every": 20,
+    "budget-penalty-weight": 25.0,
+    "mask-learning-rate": 0.002,
+    "weight-learning-rate": 0.00001,
+    "run-name": "gpt2_magrip_m6_wikitext2_r070_smoke_v1"
+  }
+}

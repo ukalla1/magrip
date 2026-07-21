@@ -1,30 +1,87 @@
 # MaGRIP v2
 
-MaGRIP v2 is a work-in-progress framework for Magnitude and Gradient Informed Pruning of large language models.
+MaGRIP v2 is a working alpha framework for Magnitude and Gradient Informed Pruning of
+large language models. It discovers transformer-block FFN targets, learns structured
+intermediate-channel masks, jointly adapts weights with APOLLO, physically compacts the
+selected FFN channels, and exports deployable Hugging Face and GGUF artifacts.
 
-The current focus is topology-aware FFN discovery and smoke-test validation. The mathematical reference is [`docs/THEORY.tex`](docs/THEORY.tex), and the implementation roadmap is [`PLAN.md`](PLAN.md).
+The mathematical reference is [`docs/THEORY.tex`](docs/THEORY.tex). The completed v2
+alpha roadmap is archived in [`docs/COMPLETED_ROADMAP.md`](docs/COMPLETED_ROADMAP.md).
 
 ## Current Status
 
-- Theory document: drafted.
-- Framework plan: drafted.
-- Python package skeleton: initialized.
-- M1 dense GPT-2 frozen-pruning baseline: validated.
-- M1 Gemma/gated frozen-pruning baseline: validated.
-- M2 FFN discovery registry: implemented for common dense and gated transformer FFNs.
-- M2 artifact validation: available for smoke-run summaries.
-- M3 mask system: implemented with structured masks, STE-ready logits, cost accounting,
-  and serialization.
-- M4 saliency system: implemented with contraction-input saliency, branch diagnostics,
-  normalization modes, and drift tracking.
-- M5 objective/training loop: implemented for mask-only training by default, with optional
-  AdamW weight updates before APOLLO integration.
+v2 alpha is complete for dense and gated FFN architectures.
+
+- M1-M4: topology-aware discovery, masks, saliency, and v1 behavior preservation are implemented.
+- M5: budget-aware objective and mask training loop are implemented.
+- M6: APOLLO/APOLLO-Mini joint mask/weight adaptation is implemented and inspected on GPT-2,
+  Gemma-2B, GPT2-XL, and Qwen3-8B runs.
+- M7: structural compaction is implemented for dense and gated FFNs, with Hugging Face save
+  and optional llama.cpp GGUF export.
+- M8: experiment tracking writes research artifacts for training, validation, compaction,
+  and deployment inspection.
+- End-to-end deployment proof point: Gemma-2B-IT at 60 percent FFN retention was trained,
+  compacted, converted to GGUF, loaded in llama.cpp, and queried successfully.
+
+Observed server-side artifact size for the Gemma-2B-IT/Gemma-family GGUF path:
+
+- baseline GGUF: about 5 GB;
+- compacted MaGRIP GGUF: about 3.2 GB;
+- reduction: about 34 percent on disk.
 
 ## Default Assumptions
 
 - FFN pruning targets are restricted to transformer blocks.
 - Distillation is disabled by default with `beta = 0.0`.
-- APOLLO will be integrated later as an optional optimizer backend for model-weight adaptation.
+- M6 uses APOLLO/APOLLO-Mini as the model-weight optimizer path for joint mask/weight
+  adaptation.
+- M7 writes a Transformers/Hugging Face compacted model first. GGUF is a separate
+  llama.cpp deployment artifact exported from that compacted HF directory.
+
+## End-To-End Gemma-2B-IT Run
+
+Use the instruction-tuned Gemma model for interactive llama.cpp behavior:
+
+```bash
+pip install -r requirements.txt
+pip install -e .
+huggingface-cli login
+```
+
+Train/prune with APOLLO:
+
+```bash
+python scripts/run_experiment_config.py \
+  configs/experiments/m6_train_gemma-2b-it_wikitext2_r060_full_v1.json
+```
+
+Compact and export GGUF:
+
+```bash
+python scripts/run_experiment_config.py \
+  configs/experiments/m7_compact_gemma-2b-it_wikitext2_r060_full_v1.json
+```
+
+Run the compacted model with llama.cpp:
+
+```bash
+./llama.cpp/build/bin/llama-cli \
+  -m models/Compacted/google__gemma-2b-it_magrip_r060_v1/gguf/gemma-2b-it_magrip_r060_v1.gguf \
+  --conversation \
+  --chat-template gemma \
+  -p "Artificial intelligence is" \
+  -n 100 \
+  --temp 0.2 \
+  --top-p 0.9 \
+  --repeat-penalty 1.1 \
+  -c 2048 \
+  --n-gpu-layers all \
+  -t 8
+```
+
+The compacted Gemma-2B-IT model produced coherent completions in llama.cpp after GGUF
+export. Base `google/gemma-2b` is not recommended for chat-style interactive testing;
+use `google/gemma-2b-it` or another instruction-tuned model for deployment checks.
 
 ## GPT-2 Smoke Test
 
@@ -173,12 +230,27 @@ python scripts/run_magrip_train.py \
 
 The training summary writes objective traces under `training.metrics`.
 Additional analysis artifacts are written under `outputs/runs/<run>/metrics/`.
+M8 research artifacts include:
+
+- `stage_metrics.csv`: baseline, initial masked, and final masked loss/perplexity.
+- `validation_curve.csv`: held-out evaluation trajectory.
+- `training_windows.csv`: coarse dynamics summaries for long runs.
+- `layer_diagnostics.csv`: per-FFN retained ratios plus mask/saliency statistics.
+- `channel_diagnostics.pkl`: per-channel masks, logits, probabilities, saliency, and costs.
+- `research_summary.json`: paper-oriented summary of loss, budget, APOLLO, and mask dynamics.
+- `RUN_CARD.md`: short human-readable run card.
 
 Audit and plot a completed M5 run with:
 
 ```bash
 python scripts/plot_magrip_run.py outputs/runs/<run>/summary.json \
   --mask-state models/Pruned/<model>_magrip_train/mask_state.pt
+```
+
+Experiment recipes live under `configs/experiments/` and can be launched with:
+
+```bash
+python scripts/run_experiment_config.py configs/experiments/m6_train_gemma-2b_wikitext2_r060_full_v3.json
 ```
 
 ## M6 APOLLO Training
@@ -197,3 +269,65 @@ python scripts/run_magrip_train.py \
 ```
 
 See `docs/APOLLO_INTEGRATION.md` for the full server command and expected diagnostics.
+
+## M7 Structural Compaction
+
+M7 physically removes the FFN channels selected out by final hardened masks. Use the
+final training checkpoint when available so compaction starts from APOLLO-adapted
+weights rather than the original baseline weights:
+
+```bash
+python scripts/compact_model.py \
+  --model-name Qwen/Qwen3-8B \
+  --checkpoint outputs/runs/<run>/checkpoints/final_model_state_dict.pt \
+  --mask-state outputs/runs/<run>/checkpoints/final_mask_state.pt \
+  --output-dir models/Compacted/Qwen__Qwen3-8B_magrip_r060 \
+  --device cuda \
+  --torch-dtype bfloat16 \
+  --verify-text "MaGRIP compaction check." \
+  --verification-policy local-targets \
+  --local-target-policy dtype-aware \
+  --eval-num-samples 512
+```
+
+New training runs also save `checkpoints/final_model_state_dict.pt` and
+`checkpoints/final_mask_state.pt`. Use those two files from the same run directory for
+compaction so the adapted weights and hardened masks cannot drift apart. Older APOLLO
+runs may only have `final_training_checkpoint.pt`; `compact_model.py` can load those
+trusted local MaGRIP checkpoints by falling back to PyTorch full-pickle loading.
+
+The script verifies masked-model logits against compacted-model logits before saving,
+then writes:
+
+- `config.json`, model shards, and tokenizer files in Hugging Face format.
+- `magrip_compaction_manifest.json` with retained-channel counts and verification stats.
+- `metrics/compaction_stage_metrics.csv` with masked-reference vs compacted evaluation
+  when `--eval-num-samples` is positive.
+- `metrics/logit_equivalence.csv` with masked-vs-compacted logit error statistics.
+  Verification is incremental by default, so structural mismatches report the first FFN
+  target whose compaction breaks equivalence. For BF16 compaction, use
+  `--verification-policy local-targets --local-target-policy dtype-aware` to accept
+  compaction when each compacted FFN target matches its masked reference up to
+  dtype-scaled local numerical drift, while still logging full-logit drift.
+
+To export GGUF for llama.cpp after HF compaction:
+
+```bash
+python scripts/compact_model.py \
+  --model-name Qwen/Qwen3-8B \
+  --checkpoint outputs/runs/<run>/checkpoints/final_model_state_dict.pt \
+  --mask-state outputs/runs/<run>/checkpoints/final_mask_state.pt \
+  --output-dir models/Compacted/Qwen__Qwen3-8B_magrip_r060 \
+  --device cuda \
+  --torch-dtype bfloat16 \
+  --export-gguf \
+  --llama-cpp-dir /path/to/llama.cpp \
+  --gguf-out models/Compacted/Qwen__Qwen3-8B_magrip_r060.gguf \
+  --gguf-outtype bf16
+```
+
+GGUF export depends on the installed llama.cpp converter supporting the compacted model
+architecture. For SentencePiece models such as Gemma or LLaMA, `compact_model.py`
+preserves `tokenizer.model` from the original tokenizer source before running the
+converter. If the tokenizer should come from a different local directory or Hub repo,
+pass `--tokenizer-source <path-or-repo-id>`.

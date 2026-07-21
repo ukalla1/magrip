@@ -1,0 +1,25 @@
+{
+  "name": "m7_compact_gemma-2b_wikitext2_r060_full_v3",
+  "script": "scripts/compact_model.py",
+  "description": "Compact Gemma-2B from final MaGRIP masks and export GGUF.",
+  "args": {
+    "model-name": "google/gemma-2b",
+    "tokenizer-source": "google/gemma-2b",
+    "checkpoint": "outputs/runs/gemma-2b_magrip_m6_wikitext2_r060_full_v3/checkpoints/final_model_state_dict.pt",
+    "mask-state": "outputs/runs/gemma-2b_magrip_m6_wikitext2_r060_full_v3/checkpoints/final_mask_state.pt",
+    "output-dir": "models/Compacted/google__gemma-2b_magrip_r060_v3",
+    "device": "cuda",
+    "torch-dtype": "bfloat16",
+    "verify-text": "MaGRIP compaction check.",
+    "verify-max-length": 128,
+    "verification-policy": "local-targets",
+    "local-target-policy": "dtype-aware",
+    "eval-num-samples": 512,
+    "eval-dataset-split": "validation",
+    "eval-batch-size": 1,
+    "export-gguf": true,
+    "llama-cpp-dir": "llama.cpp",
+    "gguf-out": "models/Compacted/google__gemma-2b_magrip_r060_v3/gguf/gemma-2b_magrip_r060_v3.gguf",
+    "gguf-outtype": "bf16"
+  }
+}

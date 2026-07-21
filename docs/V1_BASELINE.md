@@ -20,7 +20,7 @@ M1 implements the simplest dense-FFN version of this flow on GPT-2:
 - Dense FFN path: `transformer.h.{i}.mlp`.
 - Expansion module: `c_fc`.
 - Contraction module: `c_proj`.
-- Mask location: output channels of `c_fc`.
+- Mask location: post-activation intermediate channels entering `c_proj`.
 - Default calibration data: `Salesforce/wikitext`, config `wikitext-2-raw-v1`, split `validation`.
 - Default smoke calibration size: 8 fixed-length token windows.
 
@@ -34,7 +34,7 @@ The M1 gated path targets Gemma/LLaMA/Qwen-style FFNs:
 - Gated FFN path: `model.layers.{i}.mlp`.
 - Expansion branches: `gate_proj` and `up_proj`.
 - Contraction module: `down_proj`.
-- Mask location: shared output channels of `gate_proj` and `up_proj`.
+- Mask location: shared post-gating intermediate channels entering `down_proj`.
 - Saliency aggregation: branch-averaged activation magnitude and gradient sensitivity.
 
 This preserves the v1 Gemma idea of one shared intermediate mask across the gated FFN branches.

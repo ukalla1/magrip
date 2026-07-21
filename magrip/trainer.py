@@ -60,9 +60,11 @@ class TrainingStepMetrics:
     mask_grad_max: float | None = None
     mask_grad_nonzero_count: int | None = None
     mask_grad_target_count: int | None = None
+    mask_grad_nonfinite_count: int | None = None
     mask_update_mean_abs: float | None = None
     mask_update_max_abs: float | None = None
     weight_grad_norm: float | None = None
+    weight_grad_nonfinite: bool | None = None
     apollo_diagnostics: dict[str, float | int] | None = None
     active_to_inactive_count: int | None = None
     inactive_to_active_count: int | None = None
@@ -89,6 +91,7 @@ class TrainingResult:
     weight_trainable_parameter_count: int = 0
     apollo_parameter_stats: dict[str, float | int] | None = None
     initial_to_final_mask_flips: dict[str, int] | None = None
+    initial_to_final_mask_flips_by_target: dict[str, dict[str, int]] | None = None
 
     @property
     def baseline_perplexity(self) -> float:
@@ -268,6 +271,9 @@ class MaGRIPTrainer:
                 weight_trainable_parameter_count=weight_stats["trainable_parameter_count"],
                 apollo_parameter_stats=weight_stats["apollo_parameter_stats"],
                 initial_to_final_mask_flips=self._initial_to_current_mask_flips(),
+                initial_to_final_mask_flips_by_target=(
+                    self._initial_to_current_mask_flips_by_target()
+                ),
             )
         finally:
             self._restore_trainable_parameters()
@@ -319,6 +325,20 @@ class MaGRIPTrainer:
         mask_grad_stats = self._mask_gradient_stats() if mask_update else {}
         mask_grad_norm = self._clip_mask_gradients() if mask_update else None
         weight_grad_norm = self._clip_weight_gradients() if weight_update else None
+        weight_grad_nonfinite = (
+            weight_grad_norm is not None and not torch.isfinite(torch.tensor(weight_grad_norm))
+        )
+        nonfinite_reasons = self._nonfinite_reasons(
+            objective=objective,
+            mask_grad_norm=mask_grad_norm,
+            mask_grad_stats=mask_grad_stats,
+            weight_grad_norm=weight_grad_norm,
+        )
+        if nonfinite_reasons and self.config.training.fail_on_nonfinite:
+            raise FloatingPointError(
+                f"Nonfinite MaGRIP training values at step {step}: "
+                + ", ".join(nonfinite_reasons)
+            )
 
         if self.weight_optimizer is not None and weight_update:
             self.weight_optimizer.step()
@@ -380,9 +400,11 @@ class MaGRIPTrainer:
             mask_grad_max=mask_grad_stats.get("max"),
             mask_grad_nonzero_count=mask_grad_stats.get("nonzero_count"),
             mask_grad_target_count=mask_grad_stats.get("target_count"),
+            mask_grad_nonfinite_count=mask_grad_stats.get("nonfinite_count"),
             mask_update_mean_abs=mask_update_stats.get("mean_abs"),
             mask_update_max_abs=mask_update_stats.get("max_abs"),
             weight_grad_norm=weight_grad_norm,
+            weight_grad_nonfinite=weight_grad_nonfinite,
             apollo_diagnostics=apollo_diagnostics,
             active_to_inactive_count=mask_flip_stats.get("active_to_inactive"),
             inactive_to_active_count=mask_flip_stats.get("inactive_to_active"),
@@ -492,21 +514,27 @@ class MaGRIPTrainer:
         if self.masks is None:
             return {}
         norms: list[float] = []
+        nonfinite = 0
         for mask in self.masks.as_dict().values():
             if mask.logits.grad is None:
                 norms.append(0.0)
                 continue
             grad_norm = torch.linalg.vector_norm(mask.logits.grad.detach().float())
-            norms.append(float(grad_norm.cpu().item()))
+            value = float(grad_norm.cpu().item())
+            if not torch.isfinite(grad_norm):
+                nonfinite += 1
+            norms.append(value)
         if not norms:
             return {}
-        nonzero = sum(value > 0.0 for value in norms)
+        finite_norms = [value for value in norms if value == value and value not in (float("inf"), float("-inf"))]
+        nonzero = sum(value > 0.0 for value in finite_norms)
         return {
-            "mean": float(sum(norms) / len(norms)),
-            "min": float(min(norms)),
-            "max": float(max(norms)),
+            "mean": float(sum(finite_norms) / len(finite_norms)) if finite_norms else float("nan"),
+            "min": float(min(finite_norms)) if finite_norms else float("nan"),
+            "max": float(max(finite_norms)) if finite_norms else float("nan"),
             "nonzero_count": int(nonzero),
             "target_count": int(len(norms)),
+            "nonfinite_count": int(nonfinite),
         }
 
     def _mask_update_stats(self, previous_logits: dict[str, Tensor]) -> dict[str, float]:
@@ -542,6 +570,28 @@ class MaGRIPTrainer:
             "inactive_to_active": inactive_to_active,
             "total": active_to_inactive + inactive_to_active,
         }
+
+    def _nonfinite_reasons(
+        self,
+        *,
+        objective: ObjectiveBreakdown,
+        mask_grad_norm: float | None,
+        mask_grad_stats: dict[str, float | int],
+        weight_grad_norm: float | None,
+    ) -> list[str]:
+        reasons: list[str] = []
+        for name, value in objective.detached().items():
+            if not _is_finite_number(value):
+                reasons.append(f"objective.{name}={value}")
+        if mask_grad_norm is not None and not _is_finite_number(mask_grad_norm):
+            reasons.append(f"mask_grad_norm={mask_grad_norm}")
+        if int(mask_grad_stats.get("nonfinite_count", 0) or 0) > 0:
+            reasons.append(
+                f"mask_grad_nonfinite_count={mask_grad_stats['nonfinite_count']}"
+            )
+        if weight_grad_norm is not None and not _is_finite_number(weight_grad_norm):
+            reasons.append(f"weight_grad_norm={weight_grad_norm}")
+        return reasons
 
     def _clip_weight_gradients(self) -> float | None:
         parameters = [parameter for parameter in self.model.parameters() if parameter.requires_grad]
@@ -604,6 +654,22 @@ class MaGRIPTrainer:
             return None
         return self._mask_flip_stats(self._initial_binary_masks)
 
+    def _initial_to_current_mask_flips_by_target(self) -> dict[str, dict[str, int]] | None:
+        if self._initial_binary_masks is None or self.masks is None:
+            return None
+        stats: dict[str, dict[str, int]] = {}
+        for key, mask in self.masks.as_dict().items():
+            previous = self._initial_binary_masks[key].to(device=mask.logits.device)
+            current = mask.binary_values.detach().bool()
+            active_to_inactive = int((previous & ~current).sum().item())
+            inactive_to_active = int((~previous & current).sum().item())
+            stats[key] = {
+                "active_to_inactive": active_to_inactive,
+                "inactive_to_active": inactive_to_active,
+                "total": active_to_inactive + inactive_to_active,
+            }
+        return stats
+
     def _run_final_recovery(self, batches: Sequence[Tensor]) -> None:
         if not self.config.training.train_weights:
             return
@@ -662,6 +728,11 @@ class MaGRIPTrainer:
         if self.config.training.train_weights:
             checkpoint["model_state_dict"] = self.model.state_dict()
         torch.save(checkpoint, path)
+        if final and self.config.training.train_weights:
+            torch.save(
+                self.model.state_dict(),
+                checkpoint_dir / "final_model_state_dict.pt",
+            )
         mask_state_name = "final_mask_state.pt" if final else f"mask_state_step_{step}.pt"
         save_mask_state(checkpoint_dir / mask_state_name, self.masks)
         return path
@@ -686,16 +757,15 @@ class MaGRIPTrainer:
         if progress is None:
             return
         objective = metric.objective
+        mask_grad_text = _progress_float(metric.mask_grad_norm, missing="-")
+        weight_grad_text = _progress_float(metric.weight_grad_norm, missing="-")
         postfix = {
             "task": f"{objective['task_loss']:.4f}",
             "total": f"{objective['total_loss']:.4f}",
             "soft": f"{objective['retained_cost_ratio']:.3f}",
             "hard": f"{metric.hard_retained_cost_ratio:.3f}",
-            "grad": (
-                "nan"
-                if metric.mask_grad_norm is None
-                else f"{metric.mask_grad_norm:.3f}"
-            ),
+            "mask_grad": mask_grad_text,
+            "weight_grad": weight_grad_text,
             "tau": f"{metric.temperature:.3f}",
         }
         if metric.validation_loss is not None:
@@ -787,9 +857,11 @@ def training_result_to_summary(result: TrainingResult) -> dict[str, Any]:
                 "mask_grad_max": item.mask_grad_max,
                 "mask_grad_nonzero_count": item.mask_grad_nonzero_count,
                 "mask_grad_target_count": item.mask_grad_target_count,
+                "mask_grad_nonfinite_count": item.mask_grad_nonfinite_count,
                 "mask_update_mean_abs": item.mask_update_mean_abs,
                 "mask_update_max_abs": item.mask_update_max_abs,
                 "weight_grad_norm": item.weight_grad_norm,
+                "weight_grad_nonfinite": item.weight_grad_nonfinite,
                 "apollo_diagnostics": item.apollo_diagnostics,
                 "active_to_inactive_count": item.active_to_inactive_count,
                 "inactive_to_active_count": item.inactive_to_active_count,
@@ -804,6 +876,7 @@ def training_result_to_summary(result: TrainingResult) -> dict[str, Any]:
         "weight_trainable_parameter_count": result.weight_trainable_parameter_count,
         "apollo_parameter_stats": result.apollo_parameter_stats,
         "initial_to_final_mask_flips": result.initial_to_final_mask_flips,
+        "initial_to_final_mask_flips_by_target": result.initial_to_final_mask_flips_by_target,
     }
 
 
@@ -821,6 +894,22 @@ def _parameter_gradient_norm(parameters: Sequence[nn.Parameter]) -> float | None
         return None
     total = torch.linalg.vector_norm(torch.stack(norms))
     return float(total.cpu().item())
+
+
+def _is_finite_number(value: object) -> bool:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return False
+    return number == number and number not in (float("inf"), float("-inf"))
+
+
+def _progress_float(value: float | None, *, missing: str = "-") -> str:
+    if value is None:
+        return missing
+    if not _is_finite_number(value):
+        return "NONFINITE"
+    return f"{float(value):.3f}"
 
 
 def config_to_dict(config: MaGRIPConfig) -> dict[str, Any]:

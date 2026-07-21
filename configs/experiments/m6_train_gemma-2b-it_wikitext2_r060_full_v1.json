@@ -1,0 +1,30 @@
+{
+  "name": "m6_train_gemma-2b-it_wikitext2_r060_full_v1",
+  "script": "scripts/run_magrip_train.py",
+  "description": "Instruction-tuned Gemma-2B-IT WikiText-2 M6 run at 60 percent FFN retention.",
+  "args": {
+    "model-name": "google/gemma-2b-it",
+    "tokenizer-source": "google/gemma-2b-it",
+    "device": "cuda",
+    "torch-dtype": "bfloat16",
+    "use-apollo": true,
+    "apollo-variant": "apollo",
+    "apollo-parameter-scope": "all",
+    "retained-ratio": 0.6,
+    "max-steps": 4096,
+    "num-samples": 4096,
+    "eval-num-samples": 512,
+    "max-length": 512,
+    "batch-size": 1,
+    "soft-warmup-steps": 512,
+    "mask-update-frequency": 2,
+    "eval-every": 256,
+    "checkpoint-every": 512,
+    "budget-penalty-weight": 25.0,
+    "mask-regularization-weight": 0.001,
+    "mask-learning-rate": 0.002,
+    "weight-learning-rate": 0.00001,
+    "temperature-decay": 0.999,
+    "run-name": "gemma-2b-it_magrip_m6_wikitext2_r060_full_v1"
+  }
+}

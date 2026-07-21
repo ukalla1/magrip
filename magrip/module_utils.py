@@ -19,6 +19,21 @@ def get_module_by_path(root: object, path: str) -> object:
     return current
 
 
+def set_module_by_path(root: object, path: str, module: object) -> None:
+    """Replace the module at ``path`` on ``root``."""
+
+    if not path:
+        raise ValueError("Cannot replace the root module.")
+    parts = path.split(".")
+    parent_path = ".".join(parts[:-1])
+    parent = get_module_by_path(root, parent_path) if parent_path else root
+    name = parts[-1]
+    if name.isdigit() and _supports_indexing(parent):
+        parent[int(name)] = module
+    else:
+        setattr(parent, name, module)
+
+
 def has_path(root: object, path: str) -> bool:
     """Return whether ``path`` resolves from ``root``."""
 

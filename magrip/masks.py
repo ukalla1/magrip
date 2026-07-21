@@ -457,26 +457,41 @@ def apply_structured_masks(
     model: object,
     masks: Mapping[str, StructuredMask] | MaskCollection,
 ) -> Iterator[None]:
-    """Temporarily apply FFN channel masks to expansion outputs."""
+    """Temporarily apply FFN channel masks to contraction inputs.
+
+    The structured unit in MaGRIP is the intermediate FFN channel consumed by the
+    contraction projection. For dense FFNs this is the post-activation vector entering
+    the output projection; for gated FFNs this is the post-gating product entering
+    ``down_proj``. Applying masks at this boundary avoids nonlinear soft-mask artifacts
+    such as ``act(qx)`` for dense FFNs or ``q^2`` scaling for gated FFNs.
+    """
 
     mask_map = masks.as_dict() if isinstance(masks, MaskCollection) else masks
     handles = []
 
-    def make_hook(structured_mask: StructuredMask, module_path: str):
-        def hook(module: object, inputs: tuple[object, ...], output: Tensor) -> Tensor:
+    def make_contract_hook(structured_mask: StructuredMask, module_path: str):
+        def hook(module: object, inputs: tuple[object, ...]) -> tuple[object, ...]:
+            if not inputs:
+                return inputs
+            activation = inputs[0]
+            if not isinstance(activation, Tensor):
+                return inputs
             mask = structured_mask.values
-            broadcast = _broadcast_mask(mask.to(device=output.device, dtype=output.dtype), output)
-            return output * broadcast
+            broadcast = _broadcast_mask(
+                mask.to(device=activation.device, dtype=activation.dtype),
+                activation,
+            )
+            return (activation * broadcast, *inputs[1:])
 
         return hook
 
     try:
         for structured_mask in mask_map.values():
-            for module_path in structured_mask.target.expand_module_paths:
+            for module_path in structured_mask.target.contract_module_paths:
                 module = get_module_by_path(model, module_path)
                 handles.append(
-                    module.register_forward_hook(
-                        make_hook(structured_mask, module_path),
+                    module.register_forward_pre_hook(
+                        make_contract_hook(structured_mask, module_path),
                     )
                 )
         yield

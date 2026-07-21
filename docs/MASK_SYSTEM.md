@@ -6,8 +6,10 @@ M3 implements the structured FFN mask contract from `docs/THEORY.tex`.
 
 Each `StructuredMask` has one scalar per discovered FFN intermediate channel:
 
-- dense FFN: one mask value for each expansion output channel;
-- gated FFN: one shared mask value reused across all expansion branches.
+- dense FFN: one mask value for each post-activation channel entering the contraction
+  projection;
+- gated FFN: one shared mask value for each post-gating product channel entering
+  `down_proj`.
 
 The mask length is always taken from `FFNTarget.intermediate_size`; it is not hardcoded by
 architecture.
@@ -56,7 +58,7 @@ Smoke runs now save:
 
 - exact top-k mask creation from saliency;
 - dense and gated shape-derived parameter/FLOP cost accounting;
-- shared gated mask application;
+- contraction-input mask application for dense and gated FFNs;
 - STE gradient flow to mask logits;
 - temperature schedule updates;
 - mask serialization round trip.

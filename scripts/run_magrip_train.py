@@ -41,6 +41,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--eval-num-samples", type=int, default=None)
     parser.add_argument("--text-column", default="text")
     parser.add_argument("--hf-token-env", default="HF_TOKEN")
+    parser.add_argument(
+        "--tokenizer-source",
+        help="Optional tokenizer source. Defaults to --model-name.",
+    )
     parser.add_argument("--no-cache-baseline", action="store_true")
     parser.add_argument("--save-baseline", action="store_true")
     parser.add_argument("--train-weights", action="store_true")
@@ -65,6 +69,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--soft-warmup-steps", type=int, default=0)
     parser.add_argument("--mask-update-frequency", type=int, default=1)
     parser.add_argument("--clip-mask-grad-norm", type=float, default=1.0)
+    parser.add_argument("--clip-weight-grad-norm", type=float, default=None)
     parser.add_argument("--recompute-saliency-every", type=int, default=0)
     parser.add_argument("--saliency-full-gradients", action="store_true")
     parser.add_argument("--saliency-branch-diagnostics", action="store_true")
@@ -74,6 +79,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--stabilization-steps", type=int, default=0)
     parser.add_argument("--no-final-harden", action="store_true")
     parser.add_argument("--final-recovery-steps", type=int, default=0)
+    parser.add_argument(
+        "--allow-nonfinite",
+        action="store_true",
+        help="Do not fail fast when nonfinite losses or gradient norms are detected.",
+    )
     return parser.parse_args()
 
 
@@ -96,12 +106,15 @@ def main() -> None:
         load_text_calibration_batches,
     )
     from magrip.discovery import discover_ffn_targets
+    from magrip.experiment import write_training_research_artifacts
     from magrip.logging import RunLogger, cuda_memory_snapshot, system_info, tensor_stats
     from magrip.masks import save_mask_state, total_mask_cost
     from magrip.saliency import SaliencyConfig
+    from magrip.tokenizer_assets import save_tokenizer_assets
     from magrip.trainer import MaGRIPTrainer, config_to_dict, training_result_to_summary
 
     model_slug = args.model_name.replace("/", "__")
+    tokenizer_source = args.tokenizer_source or args.model_name
     run_name = args.run_name or time.strftime(f"{model_slug}_magrip_train_%Y%m%d_%H%M%S")
     run_dir = Path(args.output_dir) / run_name
     logger = RunLogger(run_dir)
@@ -122,11 +135,12 @@ def main() -> None:
     should_cache_baseline = not args.no_cache_baseline or args.save_baseline
     baseline_cache_hit = baseline_dir.exists()
     load_source = baseline_dir if baseline_cache_hit else args.model_name
+    tokenizer_load_source = baseline_dir if baseline_cache_hit else tokenizer_source
     token = os.environ.get(args.hf_token_env)
     auth_kwargs = {"token": token} if token else {}
 
     load_start = time.perf_counter()
-    tokenizer = AutoTokenizer.from_pretrained(load_source, **auth_kwargs)
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_load_source, **auth_kwargs)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     model = AutoModelForCausalLM.from_pretrained(
@@ -136,24 +150,36 @@ def main() -> None:
     )
     model.to(device)
     model.eval()
+    parameter_count = count_parameters(model)
     baseline_saved_after_download = False
     if should_cache_baseline and not baseline_cache_hit:
         baseline_dir.mkdir(parents=True, exist_ok=True)
         model.save_pretrained(baseline_dir)
-        tokenizer.save_pretrained(baseline_dir)
+        tokenizer_asset_info = save_tokenizer_assets(
+            tokenizer=tokenizer,
+            output_dir=baseline_dir,
+            tokenizer_source=tokenizer_source,
+            require_sentencepiece_assets=True,
+            token=token,
+        )
         baseline_saved_after_download = True
+    else:
+        tokenizer_asset_info = None
 
     logger.log(
         "model_loaded",
         elapsed_seconds=time.perf_counter() - load_start,
         model_name=args.model_name,
+        tokenizer_source=tokenizer_source,
         load_source=str(load_source),
+        tokenizer_load_source=str(tokenizer_load_source),
         baseline_cache_dir=baseline_dir,
         baseline_cache_hit=baseline_cache_hit,
         baseline_saved_after_download=baseline_saved_after_download,
+        tokenizer_assets=tokenizer_asset_info,
         hf_token_env=args.hf_token_env,
         hf_token_present=bool(token),
-        parameter_count=count_parameters(model),
+        parameter_count=parameter_count,
         trainable_parameter_count=count_trainable_parameters(model),
         torch_dtype=str(next(model.parameters()).dtype),
         cuda_memory=cuda_memory_snapshot(),
@@ -247,6 +273,8 @@ def main() -> None:
             final_harden=not args.no_final_harden,
             final_recovery_steps=args.final_recovery_steps,
             clip_mask_grad_norm=args.clip_mask_grad_norm,
+            clip_weight_grad_norm=args.clip_weight_grad_norm,
+            fail_on_nonfinite=not args.allow_nonfinite,
         ),
         optimizer=OptimizerConfig(
             mask_learning_rate=args.mask_learning_rate,
@@ -289,6 +317,7 @@ def main() -> None:
         final_masked_loss=result.final_masked_loss,
         cuda_memory=cuda_memory_snapshot(),
     )
+    final_cuda_memory = cuda_memory_snapshot()
 
     pruned_dir = models_dir / "Pruned" / f"{model_slug}_magrip_train"
     pruned_dir.mkdir(parents=True, exist_ok=True)
@@ -312,6 +341,11 @@ def main() -> None:
             "load_source": str(load_source),
             "hit": baseline_cache_hit,
             "saved_after_download": baseline_saved_after_download,
+        },
+        "model_parameters": {
+            "total": parameter_count,
+            "trainable_at_load": parameter_count,
+            "trainable_during_training": result.weight_trainable_parameter_count,
         },
         "torch_dtype": str(next(model.parameters()).dtype),
         "calibration": {
@@ -345,15 +379,27 @@ def main() -> None:
         "loss_delta": result.final_masked_loss - result.baseline_loss,
         "perplexity_delta": result.final_masked_perplexity - result.baseline_perplexity,
         "mask_cost": training_summary["mask_cost"],
+        "resource_usage": {
+            "cuda_memory_final": final_cuda_memory,
+            "elapsed_seconds": time.perf_counter() - wall_start,
+        },
         "elapsed_seconds": time.perf_counter() - wall_start,
     }
     (pruned_dir / "manifest.json").write_text(json.dumps(summary, indent=2) + "\n")
     write_metric_artifacts(run_dir, summary)
+    research_artifacts = write_training_research_artifacts(
+        run_dir=run_dir,
+        summary=summary,
+        result=result,
+    )
+    summary["research_artifacts"] = research_artifacts
+    (pruned_dir / "manifest.json").write_text(json.dumps(summary, indent=2) + "\n")
     logger.log(
         "artifacts_saved",
         pruned_dir=pruned_dir,
         mask_file=pruned_dir / "masks.pt",
         mask_state_file=pruned_dir / "mask_state.pt",
+        research_artifacts=research_artifacts,
     )
     logger.write_summary(summary)
 
@@ -475,9 +521,11 @@ def write_metric_artifacts(run_dir: Path, summary: dict[str, object]) -> None:
             "mask_grad_max",
             "mask_grad_nonzero_count",
             "mask_grad_target_count",
+            "mask_grad_nonfinite_count",
             "mask_update_mean_abs",
             "mask_update_max_abs",
             "weight_grad_norm",
+            "weight_grad_nonfinite",
             "apollo_optimizer_state_tensor_norm",
             "apollo_projected_state_tensor_norm",
             "apollo_update_state_tensor_norm",
@@ -511,9 +559,11 @@ def write_metric_artifacts(run_dir: Path, summary: dict[str, object]) -> None:
                 item.get("mask_grad_max"),
                 item.get("mask_grad_nonzero_count"),
                 item.get("mask_grad_target_count"),
+                item.get("mask_grad_nonfinite_count"),
                 item.get("mask_update_mean_abs"),
                 item.get("mask_update_max_abs"),
                 item.get("weight_grad_norm"),
+                item.get("weight_grad_nonfinite"),
                 apollo_diagnostics.get("optimizer_state_tensor_norm"),
                 apollo_diagnostics.get("projected_state_tensor_norm"),
                 apollo_diagnostics.get("update_state_tensor_norm"),

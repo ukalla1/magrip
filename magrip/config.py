@@ -52,6 +52,7 @@ class TrainingConfig:
     final_recovery_steps: int = 0
     clip_mask_grad_norm: float | None = 1.0
     clip_weight_grad_norm: float | None = None
+    fail_on_nonfinite: bool = True
 
 
 @dataclass

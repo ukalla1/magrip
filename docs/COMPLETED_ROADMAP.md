@@ -1,0 +1,250 @@
+# MaGRIP v2 Completed Roadmap
+
+This archived roadmap records the completed v2 alpha plan that converted
+`magrip_v1.py` from a Gemma-specific pruning script into a reusable framework for
+Magnitude and Gradient Informed Pruning. The mathematical anchor for the project is
+`docs/THEORY.tex`.
+
+The design goal is to keep MaGRIP modular: model discovery, FFN topology handling, mask parameterization, saliency collection, optimization, APOLLO integration, compaction, and evaluation should be separable pieces.
+
+## Guiding Principles
+
+- Prune structured FFN intermediate units, not arbitrary scalar weights.
+- Only target FFNs inside transformer blocks by default.
+- Treat saliency as a state-dependent signal that can be recomputed as weights and masks co-evolve.
+- Use joint soft-mask adaptation as the primary training flow, with careful schedules for budget, temperature, and mask update frequency.
+- Keep APOLLO as a weight-optimizer backend, not as part of FFN discovery or mask logic.
+- Make distillation optional and hardware-aware.
+- Prefer small, verifiable milestones over a single large rewrite.
+
+## Target Architecture
+
+```text
+magrip/
+  __init__.py
+  baseline.py
+  config.py
+  data.py
+  discovery.py
+  module_utils.py
+  topology.py
+  masks.py
+  saliency.py
+  objectives.py
+  optim.py
+  trainer.py
+  evaluation.py
+  compaction.py
+  logging.py
+scripts/
+  inspect_model.py
+  run_magrip.py
+  run_magrip_smoke.py
+  run_gpt2_smoke.py
+  compact_model.py
+tests/
+  test_discovery.py
+  test_masks.py
+  test_saliency.py
+  test_objectives.py
+  fixtures/
+docs/
+  THEORY.tex
+  V1_BASELINE.md
+  FFN_DISCOVERY.md
+  MASK_SYSTEM.md
+  SALIENCY_SYSTEM.md
+  TRAINING_LOOP.md
+  APOLLO_INTEGRATION.md
+  EXPERIMENTS.md
+models/
+  Baselines/
+  Pruned/
+```
+
+## Milestone Checklist
+
+### M0: Project Scaffold
+
+- [x] Create `docs/THEORY.tex` as the mathematical reference.
+- [x] Create this project plan and checklist.
+- [x] Add Python package skeleton under `magrip/`.
+- [x] Add `pyproject.toml` with formatting, linting, and test configuration.
+- [x] Add a minimal README describing the project goal and current status.
+
+### M1: Extract and Preserve v1 Behavior
+
+- [x] Copy the useful algorithmic pieces from `magrip_v1.py` into isolated modules.
+- [x] Remove notebook-only commands, hardcoded tokens, global constants, and plotting side effects.
+- [x] Add gated FFN discovery, shared masks, and branch-averaged saliency.
+- [x] Validate Gemma/gated smoke run artifacts.
+- [x] Add a GPT-2 smoke test for the dense-FFN baseline.
+- [x] Use WikiText-2 validation as the default small calibration dataset for smoke tests.
+- [x] Validate GPT-2 dense smoke run artifacts: discovery, saliency, masks, metrics, and logs.
+- [x] Record expected v1 assumptions: gated FFN, shared intermediate mask, frozen weights.
+
+M1 is complete. The GPT-2 dense baseline is validated by `outputs/runs/gpt2_smoke_20260710_001150`, and the Gemma gated baseline is validated by `outputs/runs/gpt2_smoke_20260710_121506`. Smoke tests use WikiText-2 validation by default so saliency is estimated from a small dataset rather than a single sentence.
+
+### M2: FFN Discovery and Topology Registry
+
+- [x] Implement transformer block discovery for common Hugging Face layouts.
+- [x] Restrict prunable search to repeated transformer blocks.
+- [x] Detect dense FFNs, gated FFNs, and branched FFNs from module shapes and names.
+- [x] Detect MoE blocks and skip them with a clear warning in v2.
+- [x] Add `FFNTarget` and `FFNTopology` data structures.
+- [x] Move M1 dense/gated discovery heuristics into an extensible topology registry.
+- [x] Add topology sanity checks for saliency length, mask length, and expected channel count.
+- [x] Add artifact validation checks for dense and gated smoke runs.
+- [x] Write discovery tests using small synthetic transformer blocks.
+- [x] Write model inspection output that explains what MaGRIP will prune before training starts.
+
+M2 is complete. Discovery is now registry-backed, restricted to known repeated transformer block stacks, and reports skipped MoE-like FFNs. The inspection and artifact-validation scripts provide the main server-side checks before pruning.
+
+### M3: Mask System
+
+- [x] Implement structured FFN channel masks.
+- [x] Support shared intermediate masks for gated FFNs.
+- [x] Implement soft mask logits, binary hard masks, STE behavior, and temperature schedules.
+- [x] Add parameter/FLOP cost accounting from discovered topology, not hardcoded hidden sizes.
+- [x] Add mask serialization and reload support.
+- [x] Add tests for mask shapes, broadcast behavior, and cost calculation.
+- [x] Inspect dense and gated M3 smoke results for technical correctness.
+
+M3 is complete. The smoke path still preserves M1 frozen-mask behavior, but masks are now represented by topology-aware `StructuredMask` objects with logits, temperatures, STE-compatible hard values, serialization, and model-derived FFN channel costs.
+
+### M4: Saliency System
+
+- [x] Implement activation magnitude saliency.
+- [x] Implement gradient-informed saliency using the first-order proxy in `docs/THEORY.tex`.
+- [x] Add layer-local normalization and optional global ranking.
+- [x] Add saliency recomputation hooks during joint training.
+- [x] Add diagnostics for saliency drift as weights adapt.
+- [x] Add tests that compare mask-gradient saliency with explicit mask gradients on toy modules.
+- [x] Inspect saliency-system results for technical correctness on dense and gated smoke runs.
+
+M4 implementation is complete. The primary saliency signal is now collected at the FFN
+contraction input, matching the theory-level intermediate `u`; branch-level expansion
+signals remain available as diagnostics. Dense and gated smoke artifacts have been
+inspected for source metadata, channel consistency, branch diagnostics, retained budget
+accounting, and loss/perplexity behavior.
+
+### M5: Objectives and Training Loop
+
+- [x] Implement task loss wrapper for causal language modeling.
+- [x] Implement budget-aware objective with default `beta = 0`.
+- [x] Add optional distillation scaffold: disabled by default plus cached-logit support.
+- [x] Implement joint two-time-scale optimization for weights and mask logits.
+- [x] Add schedules for retained budget `rho_t`, budget pressure `lambda_t`, temperature `tau_t`, and mask update frequency.
+- [x] Add gradient clipping for mask parameters.
+- [x] Add stabilization stage and final weight-only recovery stage.
+- [x] Add checkpointing for model weights, masks, optimizer states, and run config.
+- [x] Inspect objective/training-loop results for technical correctness on dense and gated smoke runs.
+
+M5 implementation is complete. The trainer defaults to mask-only adaptation, supports
+optional AdamW weight updates, keeps APOLLO reserved for M6, and records objective,
+budget, mask-gradient, retained-cost, checkpoint, and saliency-drift signals. M5 result
+inspection passed on GPT-2 dense and Gemma gated smoke runs. The quick runs are
+technically coherent, but longer runs should use stronger budget pressure because relaxed
+mask probabilities can drift below the final hard-mask target before hardening. Follow-up
+M5 tuning added budget-calibrated saliency-logit initialization so the relaxed objective
+starts near the target retained-cost ratio.
+
+### M6: APOLLO Integration
+
+Goal: move from M5 mask-only refinement to the joint optimization described in
+`docs/THEORY.tex`: APOLLO updates model weights `theta`, a separate lightweight optimizer
+updates mask logits `phi`, and the loss keeps `beta=0` so distillation/KL preservation
+remains out of scope for this milestone.
+
+- [x] Integrate APOLLO/APOLLO-Mini as the M6 model-weight optimizer for `theta`.
+- [x] Keep mask logits `phi` on their own optimizer, schedule, clipping, and update frequency.
+- [x] Build APOLLO parameter groups for the chosen adaptation scope.
+- [x] Add configuration for APOLLO rank, scale, projection update gap, mini mode, learning rate, and weight decay.
+- [x] Preserve M5 saliency-based, budget-calibrated mask initialization as the default start state.
+- [x] Add a soft-mask warmup stage where masks use relaxed probabilities before switching to hard STE.
+- [x] Add configuration for warmup steps, hard-STE switch step, temperature schedule, and two-time-scale mask update frequency.
+- [x] Ensure the M6 objective updates both `theta` and `phi` with task loss, budget loss, and entropy/mask regularization while keeping `beta=0`.
+- [x] Track channel-trading diagnostics: per-target mask gradient coverage, mask update magnitude, active/inactive flips, and final top-k membership changes from initialization.
+- [x] Track APOLLO diagnostics: adapted parameter count, projected-gradient/update norms when exposed by APOLLO, optimizer memory estimate, and weight-update norms.
+- [x] Add periodic validation during training so convergence is measured on a fixed held-out set, not raw train-batch loss.
+- [x] Document APOLLO integration, memory tradeoffs, and the M6 training protocol in `docs/APOLLO_INTEGRATION.md`.
+- [x] Inspect APOLLO integration results for technical correctness on smoke and target-scale runs.
+
+M6 is complete. APOLLO-integrated joint mask/weight training has been inspected on
+GPT-2 smoke, Gemma-2B gated, GPT2-XL dense, and Qwen3-8B gated runs. The milestone
+clears the framework-correctness bar: APOLLO updates are active, mask gradients cover
+all discovered FFN targets, validation is logged during training, final masks harden to
+the configured budget, and artifacts pass dense/gated validation. GPT2-XL needs later
+tuning for stronger final perplexity, but that is an experiment-quality issue rather
+than an M6 implementation blocker.
+
+### M7: Structural Compaction
+
+- [x] Convert final binary masks into physically smaller FFN modules.
+- [x] Compact dense FFNs.
+- [x] Compact gated FFNs by removing aligned gate/up rows and down columns.
+- [x] Add masked-vs-compacted logit equivalence checks.
+- [x] Save compacted model and tokenizer in Hugging Face format.
+- [x] Add optional GGUF export through the llama.cpp Hugging Face converter.
+- [x] Verify compacted model against masked model on server runs with dtype-aware local-target equivalence.
+- [x] Verify compacted Hugging Face models save and convert for gated architectures.
+- [x] Verify GGUF export for at least one llama.cpp-supported compacted model.
+- [x] Inspect compacted gated model artifacts for technical correctness.
+
+M7 is complete. Gemma-2B-IT was pruned to 60 percent FFN retention, structurally
+compacted, exported to Hugging Face format, converted to GGUF, loaded in llama.cpp, and
+queried successfully. The compacted GGUF artifact was materially smaller on disk than the
+baseline GGUF artifact, with a reported reduction from roughly 5 GB to 3.2 GB on the
+server. BF16 strict-logit drift is logged as a numerical diagnostic; the structural
+acceptance criterion is dtype-aware local FFN-target equivalence plus held-out evaluation.
+
+### M8: Evaluation and Experiment Tracking
+
+- [x] Evaluate perplexity before pruning, during soft-mask training, after hardening, and after compaction.
+- [x] Report retained parameters, retained FFN parameters, approximate FLOPs, latency, and memory.
+- [x] Add experiment configs for tiny, small, and target-scale models.
+- [x] Track run artifacts in a predictable output directory.
+- [x] Maintain `docs/EXPERIMENTS.md` with results and lessons learned.
+- [x] Save research-oriented traces for stage metrics, validation curves, training windows, layer diagnostics, and channel diagnostics.
+- [x] Save compaction evaluation artifacts for masked-reference vs compacted equivalence and optional held-out loss/perplexity.
+- [x] Inspect evaluation and experiment-tracking outputs for technical correctness.
+
+M8 is complete. Training and compaction runs now emit paper-oriented metrics, run cards,
+channel diagnostics, validation curves, compaction manifests, GGUF metadata, and
+deployment-oriented checks. The Gemma-2B-IT end-to-end run provides the first validated
+M6/M7/M8 deployment proof point.
+
+## Implementation Sequence
+
+1. Build the scaffold and configuration layer.
+2. Implement FFN discovery with a dry-run model inspection command.
+3. Implement masks and cost accounting.
+4. Port v1 saliency into topology-aware collectors.
+5. Build the default objective and joint training loop without APOLLO.
+6. Validate on tiny models and synthetic FFNs.
+7. Add APOLLO as the model-weight optimizer backend and train weights jointly with soft masks.
+8. Add soft-mask warmup and channel-trading diagnostics.
+9. Implement compaction and equivalence checks.
+10. Run progressively larger experiments.
+
+## Design Decisions To Keep Revisited
+
+- Global budget vs. per-layer budget vs. hybrid budget.
+- Whether mask saliency should be based on intermediate activations, mask gradients, or both.
+- How often to update masks relative to weights.
+- Whether APOLLO should adapt all weights or only FFN-heavy parameter groups.
+- How long soft-mask warmup should last before switching to hard STE.
+- Whether distillation is worth revisiting after the non-distilled APOLLO path is stable.
+- How to handle MoE architectures after the dense/gated path is stable.
+
+## Definition of Done for v2 Alpha
+
+- A user can run MaGRIP on at least one dense-FFN model and one gated-FFN model without architecture-specific code edits.
+- The framework prints discovered FFN targets before pruning.
+- The training loop supports joint soft-mask adaptation with configurable schedules.
+- The final masks can be hardened and saved.
+- A compacted model can be produced for at least gated FFNs.
+- A GGUF compacted model can be loaded and used through llama.cpp.
+- A small automated test suite covers discovery, masks, saliency, objectives, training, and compaction behavior.
+
+v2 alpha is complete as of the validated Gemma-2B-IT llama.cpp run.

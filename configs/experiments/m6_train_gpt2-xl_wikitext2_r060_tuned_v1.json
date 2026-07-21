@@ -1,0 +1,29 @@
+{
+  "name": "m6_train_gpt2-xl_wikitext2_r060_tuned_v1",
+  "script": "scripts/run_magrip_train.py",
+  "description": "Dense GPT2-XL run with stronger budget pressure and longer settling.",
+  "args": {
+    "model-name": "gpt2-xl",
+    "device": "cuda",
+    "torch-dtype": "bfloat16",
+    "use-apollo": true,
+    "apollo-variant": "apollo-mini",
+    "apollo-parameter-scope": "all",
+    "retained-ratio": 0.6,
+    "max-steps": 8192,
+    "num-samples": 8192,
+    "eval-num-samples": 512,
+    "max-length": 512,
+    "batch-size": 1,
+    "soft-warmup-steps": 1024,
+    "mask-update-frequency": 2,
+    "eval-every": 512,
+    "checkpoint-every": 1024,
+    "budget-penalty-weight": 50.0,
+    "mask-regularization-weight": 0.001,
+    "mask-learning-rate": 0.001,
+    "weight-learning-rate": 0.00001,
+    "temperature-decay": 0.999,
+    "run-name": "gpt2-xl_magrip_m6_wikitext2_r060_tuned_v1"
+  }
+}

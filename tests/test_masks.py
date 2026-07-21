@@ -5,6 +5,7 @@ import torch
 from torch import nn
 
 from magrip.masks import (
+    StructuredMask,
     annealed_temperature,
     apply_structured_masks,
     infer_channel_costs,
@@ -54,6 +55,9 @@ class DenseMLP(nn.Module):
         self.c_fc = nn.Linear(4, 6)
         self.c_proj = nn.Linear(6, 4)
 
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.c_proj(torch.nn.functional.gelu(self.c_fc(x)))
+
 
 class GatedMLP(nn.Module):
     def __init__(self) -> None:
@@ -62,17 +66,26 @@ class GatedMLP(nn.Module):
         self.up_proj = nn.Linear(4, 6)
         self.down_proj = nn.Linear(6, 4)
 
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.down_proj(torch.nn.functional.silu(self.gate_proj(x)) * self.up_proj(x))
+
 
 class Block(nn.Module):
     def __init__(self, mlp: nn.Module) -> None:
         super().__init__()
         self.mlp = mlp
 
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.mlp(x)
+
 
 class Model(nn.Module):
     def __init__(self, mlp: nn.Module) -> None:
         super().__init__()
         self.block = Block(mlp)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.block(x)
 
 
 def test_masks_from_saliency_uses_target_channel_count() -> None:
@@ -111,20 +124,50 @@ def test_gated_channel_cost_includes_all_expansion_branches() -> None:
     assert torch.allclose(flop_costs, torch.full((6,), 12.0))
 
 
-def test_apply_structured_masks_reuses_one_gated_mask_for_all_branches() -> None:
+def test_apply_structured_masks_masks_gated_contraction_input_once() -> None:
     model = Model(GatedMLP())
     target = gated_target()
     saliency = {target.ffn_path: torch.tensor([0, 1, 2, 3, 4, 5], dtype=torch.float32)}
     masks = masks_from_saliency(saliency, [target], retained_ratio=0.5)
     x = torch.ones(1, 2, 4)
 
+    unmasked_gate = model.block.mlp.gate_proj(x)
+    unmasked_up = model.block.mlp.up_proj(x)
     with apply_structured_masks(model, masks):
         gate = model.block.mlp.gate_proj(x)
         up = model.block.mlp.up_proj(x)
+        actual = model(x)
 
-    expected_zero = torch.zeros_like(gate[..., :3])
-    assert torch.allclose(gate[..., :3], expected_zero)
-    assert torch.allclose(up[..., :3], expected_zero)
+    intermediate = torch.nn.functional.silu(unmasked_gate) * unmasked_up
+    expected_mask = torch.tensor([0, 0, 0, 1, 1, 1], dtype=intermediate.dtype)
+    expected = model.block.mlp.down_proj(intermediate * expected_mask)
+
+    assert torch.allclose(gate, unmasked_gate)
+    assert torch.allclose(up, unmasked_up)
+    assert torch.allclose(actual, expected)
+
+
+def test_soft_gated_mask_scales_post_gating_product_once() -> None:
+    model = Model(GatedMLP())
+    target = gated_target()
+    mask = StructuredMask(
+        target=target,
+        values=torch.tensor([0.25, 0.5, 0.75, 1.0, 0.1, 0.9], dtype=torch.float32),
+        hard=False,
+        trainable=False,
+    )
+    x = torch.randn(1, 2, 4)
+
+    gate = model.block.mlp.gate_proj(x)
+    up = model.block.mlp.up_proj(x)
+    expected = model.block.mlp.down_proj(
+        torch.nn.functional.silu(gate) * up * mask.values,
+    )
+
+    with apply_structured_masks(model, {target.ffn_path: mask}):
+        actual = model(x)
+
+    assert torch.allclose(actual, expected)
 
 
 def test_trainable_mask_ste_propagates_to_logits() -> None:

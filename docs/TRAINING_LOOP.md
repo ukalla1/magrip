@@ -90,7 +90,9 @@ The output directory contains:
 - `events.jsonl` with structured run events;
 - `models/Pruned/<model>_magrip_train/mask_state.pt`;
 - `models/Pruned/<model>_magrip_train/masks.pt`;
-- optional full training checkpoints when `--checkpoint-every` is set.
+- optional full training checkpoints when `--checkpoint-every` is set, including
+  `checkpoints/final_model_state_dict.pt` and `checkpoints/final_mask_state.pt` for
+  paired structural compaction.
 
 The CLI shows a tqdm progress bar by default with task loss, total loss, soft/hard retained
 budget, mask gradient norm, and temperature. Use `--no-progress` for non-interactive logs.
